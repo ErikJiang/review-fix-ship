@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -111,7 +112,7 @@ test("preflight reports repository status and optional provider adapters", (t) =
   const repo = createRepo(root);
 
   const output = reviewctlJson(["preflight", "--repo", repo]);
-  assert.equal(resolve(output.repository.root), resolve(repo));
+  assert.equal(realpathSync(output.repository.root), realpathSync(repo));
   assert.equal(output.repository.dirty, false);
   assert.equal(typeof output.adapters.github.available, "boolean");
   assert.equal(typeof output.adapters.gitlab.available, "boolean");
