@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Fix Ship"
+  short_description: "Token-efficient review, fix, and PR/MR workflow"
+  default_prompt: "Use $review-fix-ship to identify high-value review findings with available token-saving tools, plan selected fixes, and prepare a guarded PR or MR."

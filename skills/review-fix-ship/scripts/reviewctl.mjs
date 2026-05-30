@@ -1,0 +1,1090 @@
+#!/usr/bin/env node
+
+import { spawnSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  accessSync,
+  constants,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const SKILL_DIR = dirname(SCRIPT_DIR);
+const WORKSPACE_PHASES = [
+  "workspace_ready",
+  "plan_ready",
+  "plan_approved",
+  "implementing",
+  "self_reviewed",
+  "commit_pending",
+  "committed",
+  "push_pending",
+  "pushed",
+  "submit_pending",
+  "submitted",
+];
+const SEVERITIES = new Set(["critical", "high", "medium", "low"]);
+
+class ReviewCtlError extends Error {
+  constructor(message, details = undefined) {
+    super(message);
+    this.name = "ReviewCtlError";
+    this.details = details;
+  }
+}
+
+function die(message, details = undefined) {
+  throw new ReviewCtlError(message, details);
+}
+
+function parseArgs(argv) {
+  const options = {};
+  const positional = [];
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (!token.startsWith("--")) {
+      positional.push(token);
+      continue;
+    }
+
+    const key = token.slice(2);
+    const next = argv[index + 1];
+    const value = next !== undefined && !next.startsWith("--") ? argv[++index] : true;
+    if (options[key] === undefined) {
+      options[key] = value;
+    } else if (Array.isArray(options[key])) {
+      options[key].push(value);
+    } else {
+      options[key] = [options[key], value];
+    }
+  }
+
+  return { options, positional };
+}
+
+function values(options, key) {
+  const value = options[key];
+  if (value === undefined) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function required(options, key) {
+  const value = options[key];
+  if (value === undefined || value === true || value === "") {
+    die(`Missing required option --${key}`);
+  }
+  return String(Array.isArray(value) ? value.at(-1) : value);
+}
+
+function optional(options, key, fallback = undefined) {
+  const value = options[key];
+  if (value === undefined) return fallback;
+  return String(Array.isArray(value) ? value.at(-1) : value);
+}
+
+function flag(options, key) {
+  return options[key] === true || options[key] === "true";
+}
+
+function printJson(value) {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function readJson(file) {
+  return JSON.parse(readFileSync(file, "utf8"));
+}
+
+function writeJson(file, value) {
+  mkdirSync(dirname(file), { recursive: true });
+  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  renameSync(temporary, file);
+}
+
+function writeText(file, value) {
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, value.endsWith("\n") ? value : `${value}\n`, "utf8");
+}
+
+function run(command, args, { cwd = undefined, allowFailure = false } = {}) {
+  const result = spawnSync(command, args, {
+    cwd,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+
+  if (result.error && !allowFailure) {
+    die(`Failed to execute ${command}`, { error: result.error.message });
+  }
+
+  if ((result.status ?? 1) !== 0 && !allowFailure) {
+    die(`Command failed: ${formatCommand(command, args)}`, {
+      exitCode: result.status,
+      stderr: (result.stderr || "").trim(),
+      stdout: (result.stdout || "").trim(),
+    });
+  }
+
+  return {
+    ok: !result.error && result.status === 0,
+    status: result.status,
+    stdout: (result.stdout || "").trim(),
+    stderr: (result.stderr || "").trim(),
+  };
+}
+
+function runGit(repo, args, options = {}) {
+  return run("git", ["-C", repo, ...args], options);
+}
+
+function findCommand(command) {
+  const mode = process.platform === "win32" ? constants.F_OK : constants.X_OK;
+  const hasPathSeparator = command.includes("/") || command.includes("\\");
+  const directories = hasPathSeparator
+    ? [""]
+    : (process.env.PATH || "").split(delimiter).filter(Boolean);
+  const extensions = process.platform === "win32" && !extname(command)
+    ? (process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)
+    : [""];
+
+  for (const directory of directories) {
+    for (const extension of extensions) {
+      const candidate = hasPathSeparator
+        ? resolve(command)
+        : join(directory, `${command}${extension}`);
+      try {
+        accessSync(candidate, mode);
+        return candidate;
+      } catch {
+        // Continue searching PATH.
+      }
+    }
+  }
+
+  return null;
+}
+
+function commandExists(command) {
+  return findCommand(command) !== null;
+}
+
+function commandVersion(command) {
+  const executable = findCommand(command);
+  if (!executable) return null;
+  const result = run(executable, ["--version"], { allowFailure: true });
+  if (!result.ok) return null;
+  return (result.stdout || result.stderr).split(/\r?\n/)[0] || null;
+}
+
+function formatCommand(command, args) {
+  return [command, ...args].map(shellQuote).join(" ");
+}
+
+function shellQuote(value) {
+  const text = String(value);
+  if (/^[A-Za-z0-9_./:@=-]+$/.test(text)) return text;
+  return `"${text.replaceAll('"', '\\"')}"`;
+}
+
+function normalizePathForHash(value) {
+  const normalized = resolve(value).replaceAll("\\", "/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function shortHash(value) {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
+function stateHome(options) {
+  const configured = optional(options, "state-home") || process.env.REVIEW_FIX_SHIP_HOME;
+  if (configured) return resolve(configured);
+
+  const codexHome = process.env.CODEX_HOME
+    ? resolve(process.env.CODEX_HOME)
+    : join(homedir(), ".codex");
+  return join(codexHome, "review-fix-ship");
+}
+
+function repositoryInfo(repoInput) {
+  const candidate = resolve(repoInput);
+  const topLevel = runGit(candidate, ["rev-parse", "--show-toplevel"]).stdout;
+  const common = runGit(topLevel, ["rev-parse", "--git-common-dir"]).stdout;
+  const commonDir = isAbsolute(common) ? resolve(common) : resolve(topLevel, common);
+  const origin = runGit(topLevel, ["config", "--get", "remote.origin.url"], {
+    allowFailure: true,
+  }).stdout;
+  const branch = runGit(topLevel, ["branch", "--show-current"], {
+    allowFailure: true,
+  }).stdout;
+  const dirtyLines = runGit(topLevel, ["status", "--porcelain"]).stdout
+    .split(/\r?\n/)
+    .filter(Boolean);
+  const submoduleLines = existsSync(join(topLevel, ".gitmodules"))
+    ? runGit(topLevel, ["submodule", "status", "--recursive"], {
+        allowFailure: true,
+      }).stdout.split(/\r?\n/).filter(Boolean)
+    : [];
+
+  return {
+    root: topLevel,
+    commonDir,
+    fingerprint: shortHash(normalizePathForHash(commonDir)),
+    origin: origin || null,
+    branch: branch || null,
+    dirty: dirtyLines.length > 0,
+    dirtyFiles: dirtyLines,
+    submodules: submoduleLines,
+  };
+}
+
+function cavemanStatus(repo) {
+  const configured = process.env.CAVEMAN_SKILL_DIR;
+  const candidates = [
+    configured ? resolve(configured, "SKILL.md") : null,
+    join(homedir(), ".codex", "skills", "caveman", "SKILL.md"),
+    join(homedir(), ".agents", "skills", "caveman", "SKILL.md"),
+    join(homedir(), ".claude", "skills", "caveman", "SKILL.md"),
+    join(repo.root, ".agents", "skills", "caveman", "SKILL.md"),
+  ].filter(Boolean);
+  const detectedPaths = candidates.filter((candidate) => existsSync(candidate));
+
+  return {
+    available: detectedPaths.length > 0,
+    type: "agent-skill",
+    detectedPaths,
+    usage: "Use concise response mode for progress and results while preserving evidence, approval prompts, and required artifacts.",
+    installUrl: "https://github.com/JuliusBrussee/caveman",
+  };
+}
+
+function efficiencyTools(repo) {
+  const rtkPath = findCommand("rtk");
+  const codegraphPath = findCommand("codegraph");
+  const codegraphIndex = join(repo.root, ".codegraph");
+  const tools = {
+    caveman: cavemanStatus(repo),
+    rtk: {
+      available: Boolean(rtkPath),
+      type: "cli-output-filter",
+      commandPath: rtkPath,
+      version: rtkPath ? commandVersion("rtk") : null,
+      usage: "Prefer explicit rtk wrappers for exploratory shell reads, diffs, searches, tests, builds, and lint output. Keep reviewctl state operations raw and deterministic.",
+      installUrl: "https://github.com/rtk-ai/rtk",
+    },
+    codegraph: {
+      available: Boolean(codegraphPath),
+      type: "local-code-index",
+      commandPath: codegraphPath,
+      version: codegraphPath ? commandVersion("codegraph") : null,
+      initialized: existsSync(codegraphIndex),
+      indexPath: codegraphIndex,
+      usage: "Prefer CodeGraph MCP tools or CLI context, callers, callees, impact, and affected queries for structural exploration. Ask before creating a new .codegraph index.",
+      installUrl: "https://github.com/colbymchenry/codegraph",
+    },
+  };
+
+  const recommendations = [];
+  if (tools.caveman.available) recommendations.push("Activate caveman concise mode for user-facing progress and final summaries.");
+  if (tools.rtk.available) recommendations.push("Use rtk explicitly for high-volume exploratory shell output.");
+  if (tools.codegraph.available && tools.codegraph.initialized) {
+    recommendations.push("Use CodeGraph directly for structural exploration and impact analysis.");
+  } else if (tools.codegraph.available) {
+    recommendations.push("Offer to run codegraph init -i before structural exploration; it creates a local .codegraph index.");
+  }
+
+  return {
+    platform: {
+      os: process.platform,
+      arch: process.arch,
+      node: process.version,
+    },
+    tools,
+    recommendations,
+  };
+}
+
+function repoStateDir(repo, options) {
+  return join(stateHome(options), "repos", repo.fingerprint);
+}
+
+function runDir(repo, options, runId) {
+  return join(repoStateDir(repo, options), "runs", runId);
+}
+
+function runFile(repo, options, runId) {
+  return join(runDir(repo, options, runId), "run.json");
+}
+
+function loadRun(repo, options, runId) {
+  const file = runFile(repo, options, runId);
+  if (!existsSync(file)) die(`Run not found: ${runId}`, { file });
+  return { file, dir: dirname(file), data: readJson(file) };
+}
+
+function saveRun(runContext) {
+  runContext.data.updatedAt = new Date().toISOString();
+  writeJson(runContext.file, runContext.data);
+}
+
+function workspaceFile(runContext, findingId) {
+  return join(runContext.dir, "workspaces", `${findingId}.json`);
+}
+
+function loadWorkspace(runContext, findingId) {
+  const file = workspaceFile(runContext, findingId);
+  if (!existsSync(file)) die(`Workspace not found for finding: ${findingId}`, { file });
+  return { file, data: readJson(file) };
+}
+
+function saveWorkspace(workspaceContext) {
+  workspaceContext.data.updatedAt = new Date().toISOString();
+  writeJson(workspaceContext.file, workspaceContext.data);
+}
+
+function nextRunId() {
+  const timestamp = new Date().toISOString().replaceAll(/[-:.]/g, "").slice(0, 15);
+  return `${timestamp}-${randomBytes(3).toString("hex")}`;
+}
+
+function normalizeOrigin(origin) {
+  if (!origin) return null;
+  let host = null;
+  let repoPath = null;
+
+  if (/^[^@]+@[^:]+:.+$/.test(origin)) {
+    const match = origin.match(/^[^@]+@([^:]+):(.+)$/);
+    host = match[1];
+    repoPath = match[2];
+  } else {
+    try {
+      const url = new URL(origin);
+      host = url.hostname;
+      repoPath = url.pathname.slice(1);
+    } catch {
+      return null;
+    }
+  }
+
+  return {
+    host: host.toLowerCase(),
+    repoPath: repoPath.replace(/\.git$/i, "").replace(/^\/|\/$/g, "").toLowerCase(),
+  };
+}
+
+function parseRemoteReviewUrl(input) {
+  let url;
+  try {
+    url = new URL(input);
+  } catch {
+    return null;
+  }
+
+  if (!["http:", "https:"].includes(url.protocol)) return null;
+
+  const github = url.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/);
+  if (github) {
+    return {
+      type: "remote-review",
+      provider: "github",
+      host: url.hostname.toLowerCase(),
+      repoPath: `${github[1]}/${github[2]}`.toLowerCase(),
+      number: Number(github[3]),
+      url: url.toString(),
+    };
+  }
+
+  const gitlab = url.pathname.match(/^\/(.+)\/-\/merge_requests\/(\d+)(?:\/|$)/);
+  if (gitlab) {
+    return {
+      type: "remote-review",
+      provider: "gitlab",
+      host: url.hostname.toLowerCase(),
+      repoPath: gitlab[1].toLowerCase(),
+      number: Number(gitlab[2]),
+      url: url.toString(),
+    };
+  }
+
+  return null;
+}
+
+function validateRemoteMatchesOrigin(remote, origin) {
+  const normalizedOrigin = normalizeOrigin(origin);
+  if (!normalizedOrigin) return;
+  if (
+    remote.host !== normalizedOrigin.host ||
+    remote.repoPath !== normalizedOrigin.repoPath
+  ) {
+    die("Remote review URL does not match repository origin", {
+      reviewUrl: remote.url,
+      expected: normalizedOrigin,
+      actual: { host: remote.host, repoPath: remote.repoPath },
+    });
+  }
+}
+
+function commitishExists(repo, value) {
+  return runGit(repo, ["rev-parse", "--verify", "--quiet", `${value}^{commit}`], {
+    allowFailure: true,
+  }).ok;
+}
+
+function normalizeScope(repo, input) {
+  const remote = parseRemoteReviewUrl(input);
+  if (remote) {
+    validateRemoteMatchesOrigin(remote, repo.origin);
+    return remote;
+  }
+
+  if (/^https?:\/\//i.test(input)) {
+    die(`Unsupported remote review URL: ${input}`);
+  }
+
+  const comparison = input.match(/^(.+)\.\.\.(.+)$/);
+  if (comparison) {
+    const [, base, head] = comparison;
+    if (!commitishExists(repo.root, base) || !commitishExists(repo.root, head)) {
+      die(`Invalid comparison scope: ${input}`);
+    }
+    return { type: "comparison", base, head };
+  }
+
+  const candidate = resolve(repo.root, input);
+  const relativePath = relative(repo.root, candidate);
+  const insideRepo = relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+  if (insideRepo && existsSync(candidate)) {
+    return {
+      type: statSync(candidate).isDirectory() ? "directory" : "file",
+      path: relativePath === "" ? "." : relativePath.replaceAll("\\", "/"),
+    };
+  }
+
+  if (commitishExists(repo.root, input)) {
+    return { type: "revision", ref: input };
+  }
+
+  die(`Unsupported or missing scope: ${input}`);
+}
+
+function uniqueScopes(scopes) {
+  const seen = new Set();
+  return scopes.filter((scope) => {
+    const key = JSON.stringify(scope);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function requireRunPhase(runContext, expected) {
+  const allowed = Array.isArray(expected) ? expected : [expected];
+  if (!allowed.includes(runContext.data.phase)) {
+    die(`Run phase must be ${allowed.join(" or ")}`, {
+      actual: runContext.data.phase,
+    });
+  }
+}
+
+function phaseAtLeast(actual, expected) {
+  return WORKSPACE_PHASES.indexOf(actual) >= WORKSPACE_PHASES.indexOf(expected);
+}
+
+function requireWorkspacePhase(workspaceContext, expected) {
+  const allowed = Array.isArray(expected) ? expected : [expected];
+  if (!allowed.includes(workspaceContext.data.phase)) {
+    die(`Workspace phase must be ${allowed.join(" or ")}`, {
+      actual: workspaceContext.data.phase,
+    });
+  }
+}
+
+function slugify(value) {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  return slug || "fix";
+}
+
+function findingById(runContext, findingId) {
+  const file = join(runContext.dir, "findings.json");
+  if (!existsSync(file)) die("Findings have not been recorded");
+  const finding = readJson(file).find((item) => item.id === findingId);
+  if (!finding) die(`Finding not found: ${findingId}`);
+  return finding;
+}
+
+function selectedIds(runContext) {
+  const file = join(runContext.dir, "selection.json");
+  if (!existsSync(file)) die("Findings have not been selected");
+  return readJson(file).findingIds;
+}
+
+function ensureSelected(runContext, findingId) {
+  if (!selectedIds(runContext).includes(findingId)) {
+    die(`Finding is not selected: ${findingId}`);
+  }
+}
+
+function ensureConfirmed(options, action) {
+  if (!flag(options, "confirm")) {
+    die(`${action} requires explicit --confirm`);
+  }
+}
+
+function workspaceWorkDir(repo, workspace) {
+  return workspace.mode === "worktree" ? workspace.path : repo.root;
+}
+
+function ensureWorkspaceCheckedOut(repo, workspace) {
+  const workDir = workspaceWorkDir(repo, workspace);
+  const actualBranch = runGit(workDir, ["branch", "--show-current"]).stdout;
+  if (actualBranch !== workspace.branch) {
+    die("Expected workspace branch is not checked out", {
+      expected: workspace.branch,
+      actual: actualBranch || null,
+      workDir,
+    });
+  }
+  return workDir;
+}
+
+function listText(items, fallback = "- None specified") {
+  return items.length ? items.map((item) => `- ${item}`).join("\n") : fallback;
+}
+
+function numberedText(items) {
+  return items.map((item, index) => `${index + 1}. ${item}`).join("\n");
+}
+
+function render(template, replacements) {
+  return Object.entries(replacements).reduce(
+    (text, [key, value]) => text.replaceAll(`{{${key}}}`, value),
+    template,
+  );
+}
+
+function asset(name) {
+  return readFileSync(join(SKILL_DIR, "assets", name), "utf8");
+}
+
+function repositoryTemplates(repo) {
+  const templates = [];
+  const candidates = [
+    join(repo.root, ".github", "pull_request_template.md"),
+    join(repo.root, ".gitlab", "merge_request_templates"),
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) templates.push(candidate);
+  }
+
+  const githubDirectory = join(repo.root, ".github", "PULL_REQUEST_TEMPLATE");
+  if (existsSync(githubDirectory)) templates.push(githubDirectory);
+  return templates;
+}
+
+function validateFindings(findings) {
+  if (!Array.isArray(findings)) die("Findings file must contain a JSON array");
+  if (findings.length > 5) die("Findings file must contain at most five entries");
+  const ids = new Set();
+
+  for (const finding of findings) {
+    if (!finding || typeof finding !== "object") die("Each finding must be an object");
+    if (!finding.id || ids.has(finding.id)) die("Each finding must have a unique id");
+    ids.add(finding.id);
+    if (!finding.title) die(`Finding ${finding.id} is missing title`);
+    if (!SEVERITIES.has(finding.severity)) die(`Finding ${finding.id} has invalid severity`);
+    if (!Number.isFinite(finding.confidence) || finding.confidence < 80 || finding.confidence > 100) {
+      die(`Finding ${finding.id} confidence must be between 80 and 100`);
+    }
+    if (!Number.isFinite(finding.valueScore) || finding.valueScore < 0 || finding.valueScore > 100) {
+      die(`Finding ${finding.id} valueScore must be between 0 and 100`);
+    }
+    if (!Array.isArray(finding.evidence) || finding.evidence.length === 0) {
+      die(`Finding ${finding.id} must include evidence`);
+    }
+    for (const evidence of finding.evidence) {
+      if (!evidence.path || !evidence.detail) {
+        die(`Finding ${finding.id} evidence requires path and detail`);
+      }
+    }
+    for (const field of ["trigger", "impact", "recommendedFix"]) {
+      if (!finding[field]) die(`Finding ${finding.id} is missing ${field}`);
+    }
+    if (!Array.isArray(finding.validation) || finding.validation.length === 0) {
+      die(`Finding ${finding.id} must include validation steps`);
+    }
+  }
+}
+
+function handlePreflight(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  printJson({
+    repository: repo,
+    templates: repositoryTemplates(repo),
+    adapters: {
+      github: { command: "gh", available: commandExists("gh") },
+      gitlab: { command: "glab", available: commandExists("glab") },
+    },
+    efficiency: efficiencyTools(repo),
+  });
+}
+
+function handleToolsStatus(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  printJson(efficiencyTools(repo));
+}
+
+function handleScopeNormalize(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const requestedScopes = values(options, "scope").map(String);
+  const base = optional(options, "base");
+  const head = optional(options, "head");
+  if ((base && !head) || (!base && head)) die("--base and --head must be used together");
+  if (base && head) requestedScopes.push(`${base}...${head}`);
+  if (requestedScopes.length === 0) die("Provide at least one --scope or a --base/--head pair");
+
+  const scopes = uniqueScopes(requestedScopes.map((scope) => normalizeScope(repo, scope)));
+  const runId = optional(options, "run-id", nextRunId());
+  const file = runFile(repo, options, runId);
+  if (existsSync(file)) die(`Run already exists: ${runId}`);
+
+  const now = new Date().toISOString();
+  const runContext = {
+    file,
+    dir: dirname(file),
+    data: {
+      schemaVersion: 1,
+      id: runId,
+      repository: repo,
+      phase: "scoped",
+      scopes,
+      efficiency: efficiencyTools(repo),
+      createdAt: now,
+      updatedAt: now,
+    },
+  };
+  saveRun(runContext);
+  writeJson(join(runContext.dir, "scopes.json"), scopes);
+  printJson({ runId, phase: "scoped", repository: repo.root, scopes });
+}
+
+function handleStateStatus(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const workspaceDirectory = join(runContext.dir, "workspaces");
+  const workspaces = [];
+
+  if (existsSync(workspaceDirectory)) {
+    for (const findingId of runContext.data.selectedFindingIds || []) {
+      const file = workspaceFile(runContext, findingId);
+      if (existsSync(file)) workspaces.push(readJson(file));
+    }
+  }
+
+  printJson({
+    stateDirectory: runContext.dir,
+    run: runContext.data,
+    workspaces,
+  });
+}
+
+function handleRecordFindings(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  requireRunPhase(runContext, "scoped");
+  const source = resolve(required(options, "file"));
+  const findings = readJson(source);
+  validateFindings(findings);
+  writeJson(join(runContext.dir, "findings.json"), findings);
+  runContext.data.phase = "findings_ready";
+  runContext.data.findingCount = findings.length;
+  saveRun(runContext);
+  printJson({ runId: runContext.data.id, phase: runContext.data.phase, findingCount: findings.length });
+}
+
+function handleSelect(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  requireRunPhase(runContext, "findings_ready");
+  const ids = [...new Set(values(options, "id").map(String))];
+  if (ids.length === 0) die("Select at least one --id");
+  ids.forEach((id) => findingById(runContext, id));
+  writeJson(join(runContext.dir, "selection.json"), { findingIds: ids });
+  runContext.data.phase = "selected";
+  runContext.data.selectedFindingIds = ids;
+  saveRun(runContext);
+  printJson({ runId: runContext.data.id, phase: runContext.data.phase, findingIds: ids });
+}
+
+function handleStateMark(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const findingId = required(options, "finding-id");
+  const workspaceContext = loadWorkspace(runContext, findingId);
+  const target = required(options, "to");
+  const currentIndex = WORKSPACE_PHASES.indexOf(workspaceContext.data.phase);
+  const targetIndex = WORKSPACE_PHASES.indexOf(target);
+  if (targetIndex < 0) die(`Unsupported workspace phase: ${target}`);
+  if (targetIndex !== currentIndex + 1) {
+    die("Workspace transitions must advance exactly one phase", {
+      current: workspaceContext.data.phase,
+      requested: target,
+    });
+  }
+
+  if (target === "plan_approved") {
+    const planFile = join(runContext.dir, "plans", `${findingId}.md`);
+    if (!existsSync(planFile)) die("Render the action plan before approving it");
+  }
+
+  if (target === "self_reviewed") {
+    const selfReviewSource = resolve(required(options, "self-review-file"));
+    if (!existsSync(selfReviewSource)) die(`Self-review file not found: ${selfReviewSource}`);
+    const selfReviewTarget = join(runContext.dir, "self-reviews", `${findingId}.md`);
+    mkdirSync(dirname(selfReviewTarget), { recursive: true });
+    copyFileSync(selfReviewSource, selfReviewTarget);
+  }
+
+  workspaceContext.data.phase = target;
+  saveWorkspace(workspaceContext);
+  printJson({ findingId, phase: target });
+}
+
+function workspaceSpec(repo, runContext, options) {
+  requireRunPhase(runContext, "selected");
+  const findingId = required(options, "finding-id");
+  ensureSelected(runContext, findingId);
+  const finding = findingById(runContext, findingId);
+  const mode = required(options, "mode");
+  if (!["branch", "worktree"].includes(mode)) die("--mode must be branch or worktree");
+  const slug = slugify(optional(options, "slug", finding.title));
+  const branch = `review/${runContext.data.id}/${findingId.toLowerCase()}-${slug}`;
+  const base = optional(options, "base", repo.branch || "HEAD");
+  const worktreePath = resolve(
+    optional(options, "path", join(dirname(repo.root), `${basename(repo.root)}-${findingId.toLowerCase()}`)),
+  );
+  const args = mode === "worktree"
+    ? ["worktree", "add", "-b", branch, worktreePath, base]
+    : ["branch", branch, base];
+
+  return { findingId, finding, mode, branch, base, path: mode === "worktree" ? worktreePath : repo.root, args };
+}
+
+function handleWorkspacePreview(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const spec = workspaceSpec(repo, runContext, options);
+  printJson({
+    action: "workspace create",
+    repositoryDirty: repo.dirty,
+    dirtyFiles: repo.dirtyFiles,
+    command: formatCommand("git", ["-C", repo.root, ...spec.args]),
+    workspace: spec,
+  });
+}
+
+function handleWorkspaceCreate(options) {
+  ensureConfirmed(options, "workspace create");
+  const repo = repositoryInfo(required(options, "repo"));
+  if (repo.dirty && !flag(options, "allow-dirty")) {
+    die("Repository has uncommitted changes; inspect them before workspace creation", {
+      dirtyFiles: repo.dirtyFiles,
+      hint: "Re-run with --allow-dirty only after the user explicitly approves preserving the existing changes.",
+    });
+  }
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const spec = workspaceSpec(repo, runContext, options);
+  if (existsSync(workspaceFile(runContext, spec.findingId))) {
+    die(`Workspace already recorded for finding: ${spec.findingId}`);
+  }
+  if (runGit(repo.root, ["show-ref", "--verify", "--quiet", `refs/heads/${spec.branch}`], {
+    allowFailure: true,
+  }).ok) {
+    die(`Branch already exists: ${spec.branch}`);
+  }
+  if (spec.mode === "worktree" && existsSync(spec.path)) {
+    die(`Worktree path already exists: ${spec.path}`);
+  }
+
+  runGit(repo.root, spec.args);
+  const now = new Date().toISOString();
+  const workspaceContext = {
+    file: workspaceFile(runContext, spec.findingId),
+    data: {
+      schemaVersion: 1,
+      findingId: spec.findingId,
+      mode: spec.mode,
+      branch: spec.branch,
+      base: spec.base,
+      path: spec.path,
+      phase: "workspace_ready",
+      createdAt: now,
+      updatedAt: now,
+    },
+  };
+  saveWorkspace(workspaceContext);
+  printJson({ findingId: spec.findingId, phase: "workspace_ready", workspace: workspaceContext.data });
+}
+
+function handlePlanRender(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const findingId = required(options, "finding-id");
+  const workspaceContext = loadWorkspace(runContext, findingId);
+  requireWorkspacePhase(workspaceContext, ["workspace_ready", "plan_ready"]);
+  const steps = values(options, "step").map(String);
+  const tests = values(options, "test").map(String);
+  if (steps.length === 0) die("Provide at least one --step");
+  if (tests.length === 0) die("Provide at least one --test");
+  const content = render(asset("action-plan.md"), {
+    title: required(options, "title"),
+    finding: required(options, "finding"),
+    findingId,
+    branch: workspaceContext.data.branch,
+    workspace: workspaceContext.data.path,
+    steps: numberedText(steps),
+    files: listText(values(options, "file").map(String)),
+    tests: listText(tests),
+    criteria: listText(values(options, "criterion").map(String)),
+  });
+  const planFile = join(runContext.dir, "plans", `${findingId}.md`);
+  writeText(planFile, content);
+  workspaceContext.data.phase = "plan_ready";
+  workspaceContext.data.planFile = planFile;
+  saveWorkspace(workspaceContext);
+  printJson({ findingId, phase: "plan_ready", planFile });
+}
+
+function handleDraftRender(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const findingId = required(options, "finding-id");
+  const workspaceContext = loadWorkspace(runContext, findingId);
+  if (!phaseAtLeast(workspaceContext.data.phase, "self_reviewed")) {
+    die("Complete self-review before rendering a change request draft");
+  }
+  const provider = required(options, "provider");
+  if (!["github", "gitlab"].includes(provider)) die("--provider must be github or gitlab");
+  const templateFile = optional(options, "template-file");
+  const template = templateFile ? readFileSync(resolve(templateFile), "utf8") : asset(`${provider === "github" ? "github-pr" : "gitlab-mr"}.md`);
+  const risk = optional(options, "risk");
+  const content = render(template, {
+    summary: required(options, "summary"),
+    changes: listText(values(options, "change").map(String)),
+    testing: listText(values(options, "testing").map(String)),
+    risk: risk ? `\n## Risk\n${risk}\n` : "",
+  });
+  const output = join(runContext.dir, "change-requests", `${findingId}-${provider}.md`);
+  writeText(output, content);
+  const title = required(options, "title");
+  writeJson(join(runContext.dir, "change-requests", `${findingId}-${provider}.json`), {
+    provider,
+    title,
+    bodyFile: output,
+  });
+  printJson({ findingId, provider, title, bodyFile: output });
+}
+
+function handleCommitPreview(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const findingId = required(options, "finding-id");
+  const workspaceContext = loadWorkspace(runContext, findingId);
+  requireWorkspacePhase(workspaceContext, ["self_reviewed", "commit_pending"]);
+  const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
+  const message = required(options, "message");
+  printJson({
+    action: "commit",
+    findingId,
+    command: formatCommand("git", ["-C", workDir, "commit", "-m", message]),
+    changes: runGit(workDir, ["status", "--porcelain"]).stdout.split(/\r?\n/).filter(Boolean),
+    stagedFiles: runGit(workDir, ["diff", "--cached", "--name-only"]).stdout.split(/\r?\n/).filter(Boolean),
+  });
+}
+
+function handleCommitRun(options) {
+  ensureConfirmed(options, "commit run");
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const findingId = required(options, "finding-id");
+  const workspaceContext = loadWorkspace(runContext, findingId);
+  requireWorkspacePhase(workspaceContext, "commit_pending");
+  const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
+  const message = required(options, "message");
+  const changes = runGit(workDir, ["status", "--porcelain"]).stdout;
+  if (!changes) die("No changes to commit");
+  const stagedFiles = runGit(workDir, ["diff", "--cached", "--name-only"]).stdout;
+  if (!stagedFiles) die("No staged changes to commit; stage the intended files explicitly before committing");
+  runGit(workDir, ["commit", "-m", message]);
+  workspaceContext.data.phase = "committed";
+  workspaceContext.data.commit = runGit(workDir, ["rev-parse", "HEAD"]).stdout;
+  saveWorkspace(workspaceContext);
+  printJson({ findingId, phase: "committed", commit: workspaceContext.data.commit });
+}
+
+function handlePushPreview(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const findingId = required(options, "finding-id");
+  const workspaceContext = loadWorkspace(runContext, findingId);
+  requireWorkspacePhase(workspaceContext, ["committed", "push_pending"]);
+  const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
+  const remote = optional(options, "remote", "origin");
+  printJson({
+    action: "push",
+    findingId,
+    command: formatCommand("git", ["-C", workDir, "push", "-u", remote, workspaceContext.data.branch]),
+  });
+}
+
+function handlePushRun(options) {
+  ensureConfirmed(options, "push run");
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const findingId = required(options, "finding-id");
+  const workspaceContext = loadWorkspace(runContext, findingId);
+  requireWorkspacePhase(workspaceContext, "push_pending");
+  const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
+  const remote = optional(options, "remote", "origin");
+  runGit(workDir, ["push", "-u", remote, workspaceContext.data.branch]);
+  workspaceContext.data.phase = "pushed";
+  workspaceContext.data.remote = remote;
+  saveWorkspace(workspaceContext);
+  printJson({ findingId, phase: "pushed", remote });
+}
+
+function submitSpec(repo, workspace, options) {
+  const provider = required(options, "provider");
+  if (!["github", "gitlab"].includes(provider)) die("--provider must be github or gitlab");
+  const title = required(options, "title");
+  const bodyFile = resolve(required(options, "body-file"));
+  if (!existsSync(bodyFile)) die(`Body file not found: ${bodyFile}`);
+  const base = optional(options, "base", workspace.base);
+  const isDraft = flag(options, "draft");
+
+  if (provider === "github") {
+    const args = ["pr", "create", "--title", title, "--body-file", bodyFile, "--base", base];
+    if (isDraft) args.push("--draft");
+    return { provider, command: "gh", args, bodyFile, base };
+  }
+
+  const body = readFileSync(bodyFile, "utf8");
+  const args = [
+    "mr", "create",
+    "--title", title,
+    "--description", body,
+    "--target-branch", base,
+    "--source-branch", workspace.branch,
+  ];
+  if (isDraft) args.push("--draft");
+  return { provider, command: "glab", args, bodyFile, base };
+}
+
+function handleSubmitPreview(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const findingId = required(options, "finding-id");
+  const workspaceContext = loadWorkspace(runContext, findingId);
+  requireWorkspacePhase(workspaceContext, ["pushed", "submit_pending"]);
+  const spec = submitSpec(repo, workspaceContext.data, options);
+  printJson({
+    action: "submit",
+    findingId,
+    provider: spec.provider,
+    adapterAvailable: commandExists(spec.command),
+    command: formatCommand(spec.command, spec.args),
+  });
+}
+
+function handleSubmitRun(options) {
+  ensureConfirmed(options, "submit run");
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const findingId = required(options, "finding-id");
+  const workspaceContext = loadWorkspace(runContext, findingId);
+  requireWorkspacePhase(workspaceContext, "submit_pending");
+  const spec = submitSpec(repo, workspaceContext.data, options);
+  if (!commandExists(spec.command)) {
+    die(`Missing provider CLI: ${spec.command}`, {
+      hint: `Install and authenticate ${spec.command}, then re-run submit preview and submit run.`,
+    });
+  }
+  const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
+  const result = run(spec.command, spec.args, { cwd: workDir });
+  workspaceContext.data.phase = "submitted";
+  workspaceContext.data.submission = result.stdout;
+  saveWorkspace(workspaceContext);
+  printJson({ findingId, phase: "submitted", provider: spec.provider, output: result.stdout });
+}
+
+function printHelp() {
+  process.stdout.write(`reviewctl.mjs
+
+Commands:
+  preflight --repo <path>
+  tools status --repo <path>
+  scope normalize --repo <path> --scope <value> [--scope <value> ...]
+  state status --repo <path> --run-id <id>
+  state record-findings --repo <path> --run-id <id> --file <findings.json>
+  state select --repo <path> --run-id <id> --id <finding-id> [--id <finding-id> ...]
+  state mark --repo <path> --run-id <id> --finding-id <id> --to <phase>
+  workspace preview|create --repo <path> --run-id <id> --finding-id <id> --mode <branch|worktree>
+  plan render --repo <path> --run-id <id> --finding-id <id> --title <text> --finding <text> --step <text> --test <text>
+  draft render --repo <path> --run-id <id> --finding-id <id> --provider <github|gitlab> --title <text> --summary <text> --change <text> --testing <text>
+  commit preview|run --repo <path> --run-id <id> --finding-id <id> --message <text>
+  push preview|run --repo <path> --run-id <id> --finding-id <id>
+  submit preview|run --repo <path> --run-id <id> --finding-id <id> --provider <github|gitlab> --title <text> --body-file <file>
+
+Mutating create/run commands require --confirm.
+Use --state-home <path> to override external state storage.
+`);
+}
+
+function main(argv) {
+  const [group = "help", action, ...rest] = argv;
+  const { options } = parseArgs(rest);
+
+  if (group === "help" || group === "--help" || group === "-h") return printHelp();
+  if (group === "preflight") return handlePreflight(parseArgs([action, ...rest].filter(Boolean)).options);
+  if (group === "tools" && action === "status") return handleToolsStatus(options);
+  if (group === "scope" && action === "normalize") return handleScopeNormalize(options);
+  if (group === "state" && action === "status") return handleStateStatus(options);
+  if (group === "state" && action === "record-findings") return handleRecordFindings(options);
+  if (group === "state" && action === "select") return handleSelect(options);
+  if (group === "state" && action === "mark") return handleStateMark(options);
+  if (group === "workspace" && action === "preview") return handleWorkspacePreview(options);
+  if (group === "workspace" && action === "create") return handleWorkspaceCreate(options);
+  if (group === "plan" && action === "render") return handlePlanRender(options);
+  if (group === "draft" && action === "render") return handleDraftRender(options);
+  if (group === "commit" && action === "preview") return handleCommitPreview(options);
+  if (group === "commit" && action === "run") return handleCommitRun(options);
+  if (group === "push" && action === "preview") return handlePushPreview(options);
+  if (group === "push" && action === "run") return handlePushRun(options);
+  if (group === "submit" && action === "preview") return handleSubmitPreview(options);
+  if (group === "submit" && action === "run") return handleSubmitRun(options);
+  die(`Unsupported command: ${[group, action].filter(Boolean).join(" ")}`);
+}
+
+try {
+  main(process.argv.slice(2));
+} catch (error) {
+  const output = {
+    error: error.message,
+  };
+  if (error.details !== undefined) output.details = error.details;
+  process.stderr.write(`${JSON.stringify(output, null, 2)}\n`);
+  process.exitCode = 1;
+}
