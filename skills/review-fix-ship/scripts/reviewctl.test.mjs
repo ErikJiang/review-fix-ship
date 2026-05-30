@@ -5,8 +5,8 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
-  realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -89,6 +89,15 @@ function createFakeTool(directory, name) {
   return file;
 }
 
+function assertSameDirectory(actualPath, expectedPath) {
+  const actual = statSync(actualPath);
+  const expected = statSync(expectedPath);
+  assert.equal(actual.isDirectory(), true, `Expected directory: ${actualPath}`);
+  assert.equal(expected.isDirectory(), true, `Expected directory: ${expectedPath}`);
+  assert.equal(actual.dev, expected.dev);
+  assert.equal(actual.ino, expected.ino);
+}
+
 function finding(overrides = {}) {
   return {
     id: "RF-001",
@@ -112,7 +121,7 @@ test("preflight reports repository status and optional provider adapters", (t) =
   const repo = createRepo(root);
 
   const output = reviewctlJson(["preflight", "--repo", repo]);
-  assert.equal(realpathSync(output.repository.root), realpathSync(repo));
+  assertSameDirectory(output.repository.root, repo);
   assert.equal(output.repository.dirty, false);
   assert.equal(typeof output.adapters.github.available, "boolean");
   assert.equal(typeof output.adapters.gitlab.available, "boolean");
