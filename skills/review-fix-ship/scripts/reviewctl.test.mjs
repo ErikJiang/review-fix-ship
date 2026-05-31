@@ -280,6 +280,62 @@ test("finding recording rejects padding and low-confidence candidates", (t) => {
   ], /confidence must be between 80 and 100/);
 });
 
+test("workspace preview separates comparison start ref from change request target branch", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review-fix-ship-workspace-refs-"));
+  t.after(() => cleanup(root));
+  const repo = createRepo(root);
+  const stateHome = join(root, "state");
+  const findings = join(root, "findings.json");
+  writeJson(findings, [finding()]);
+  git(["-C", repo, "checkout", "-b", "feature"]);
+  writeFileSync(join(repo, "src", "example.txt"), "feature\n", "utf8");
+  git(["-C", repo, "add", "src/example.txt"]);
+  git(["-C", repo, "commit", "-m", "feature"]);
+  git(["-C", repo, "checkout", "main"]);
+
+  reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "comparison", "--scope", "main...feature"]);
+  reviewctlJson(["state", "record-findings", "--repo", repo, "--state-home", stateHome, "--run-id", "comparison", "--file", findings]);
+  reviewctlJson(["state", "select", "--repo", repo, "--state-home", stateHome, "--run-id", "comparison", "--id", "RF-001"]);
+  const preview = reviewctlJson([
+    "workspace", "preview",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "comparison",
+    "--finding-id", "RF-001",
+    "--mode", "worktree",
+    "--path", join(root, "comparison-worktree"),
+  ]);
+  assert.equal(preview.workspace.startRef, "feature");
+  assert.equal(preview.workspace.targetBranch, "main");
+  assert.match(preview.command, / feature$/);
+
+  const remoteRepo = createRepo(root, "remote-review");
+  git(["-C", remoteRepo, "remote", "add", "origin", "https://github.com/acme/project.git"]);
+  reviewctlJson(["scope", "normalize", "--repo", remoteRepo, "--state-home", stateHome, "--run-id", "remote-review", "--scope", "https://github.com/acme/project/pull/7"]);
+  reviewctlJson(["state", "record-findings", "--repo", remoteRepo, "--state-home", stateHome, "--run-id", "remote-review", "--file", findings]);
+  reviewctlJson(["state", "select", "--repo", remoteRepo, "--state-home", stateHome, "--run-id", "remote-review", "--id", "RF-001"]);
+  reviewctlFails([
+    "workspace", "preview",
+    "--repo", remoteRepo,
+    "--state-home", stateHome,
+    "--run-id", "remote-review",
+    "--finding-id", "RF-001",
+    "--mode", "branch",
+  ], /provide --start-ref and --target-branch/);
+  const explicit = reviewctlJson([
+    "workspace", "preview",
+    "--repo", remoteRepo,
+    "--state-home", stateHome,
+    "--run-id", "remote-review",
+    "--finding-id", "RF-001",
+    "--mode", "branch",
+    "--start-ref", "main",
+    "--target-branch", "main",
+  ]);
+  assert.equal(explicit.workspace.startRef, "main");
+  assert.equal(explicit.workspace.targetBranch, "main");
+});
+
 test("workspace creation refuses dirty repositories unless explicitly acknowledged", (t) => {
   const root = mkdtempSync(join(tmpdir(), "review-fix-ship-dirty-"));
   t.after(() => cleanup(root));
@@ -450,6 +506,7 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
     "--body-file", draft.bodyFile,
   ]);
   assert.match(submission.command, /^gh pr create /);
+  assert.match(submission.command, / --base main$/);
   assert.doesNotMatch(submission.command, /--dry-run/);
   assert.equal(typeof submission.adapterAvailable, "boolean");
   reviewctlFails([

@@ -780,6 +780,35 @@ function handleStateMark(options) {
   printJson({ findingId, phase: target });
 }
 
+function workspaceRefs(repo, runContext, options) {
+  const explicitStartRef = optional(options, "start-ref");
+  const explicitTargetBranch = optional(options, "target-branch");
+  if ((explicitStartRef && !explicitTargetBranch) || (!explicitStartRef && explicitTargetBranch)) {
+    die("--start-ref and --target-branch must be used together");
+  }
+  if (explicitStartRef && explicitTargetBranch) {
+    if (!commitishExists(repo.root, explicitStartRef)) die(`Invalid workspace start ref: ${explicitStartRef}`);
+    return { startRef: explicitStartRef, targetBranch: explicitTargetBranch };
+  }
+
+  const diffScopes = runContext.data.scopes.filter((scope) => !["directory", "file"].includes(scope.type));
+  if (diffScopes.length === 0) {
+    if (!repo.branch) die("Cannot derive workspace refs from a detached HEAD; provide --start-ref and --target-branch");
+    return { startRef: repo.branch, targetBranch: repo.branch };
+  }
+  if (diffScopes.length > 1) {
+    die("Cannot derive workspace refs from multiple diff scopes; provide --start-ref and --target-branch");
+  }
+
+  const [scope] = diffScopes;
+  if (scope.type === "comparison") return { startRef: scope.head, targetBranch: scope.base };
+  if (scope.type === "revision") {
+    if (!repo.branch) die("Cannot derive target branch from a detached HEAD; provide --start-ref and --target-branch");
+    return { startRef: scope.ref, targetBranch: repo.branch };
+  }
+  die("Cannot derive workspace refs from a remote review scope; provide --start-ref and --target-branch");
+}
+
 function workspaceSpec(repo, runContext, options) {
   requireRunPhase(runContext, "selected");
   const findingId = required(options, "finding-id");
@@ -789,15 +818,15 @@ function workspaceSpec(repo, runContext, options) {
   if (!["branch", "worktree"].includes(mode)) die("--mode must be branch or worktree");
   const slug = slugify(optional(options, "slug", finding.title));
   const branch = `review/${runContext.data.id}/${findingId.toLowerCase()}-${slug}`;
-  const base = optional(options, "base", repo.branch || "HEAD");
+  const { startRef, targetBranch } = workspaceRefs(repo, runContext, options);
   const worktreePath = resolve(
     optional(options, "path", join(dirname(repo.root), `${basename(repo.root)}-${findingId.toLowerCase()}`)),
   );
   const args = mode === "worktree"
-    ? ["worktree", "add", "-b", branch, worktreePath, base]
-    : ["branch", branch, base];
+    ? ["worktree", "add", "-b", branch, worktreePath, startRef]
+    : ["branch", branch, startRef];
 
-  return { findingId, finding, mode, branch, base, path: mode === "worktree" ? worktreePath : repo.root, args };
+  return { findingId, finding, mode, branch, startRef, targetBranch, path: mode === "worktree" ? worktreePath : repo.root, args };
 }
 
 function handleWorkspacePreview(options) {
@@ -845,7 +874,8 @@ function handleWorkspaceCreate(options) {
       findingId: spec.findingId,
       mode: spec.mode,
       branch: spec.branch,
-      base: spec.base,
+      startRef: spec.startRef,
+      targetBranch: spec.targetBranch,
       path: spec.path,
       phase: "workspace_ready",
       createdAt: now,
@@ -989,7 +1019,8 @@ function submitSpec(repo, workspace, options) {
   const title = required(options, "title");
   const bodyFile = resolve(required(options, "body-file"));
   if (!existsSync(bodyFile)) die(`Body file not found: ${bodyFile}`);
-  const base = optional(options, "base", workspace.base);
+  const base = optional(options, "base", workspace.targetBranch || workspace.base);
+  if (!base) die("Missing target branch; provide --base");
   const isDraft = flag(options, "draft");
 
   if (provider === "github") {
