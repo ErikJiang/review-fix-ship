@@ -106,6 +106,8 @@ node "$reviewctl" tools status --repo C:\path\to\repo
 node "$reviewctl" scope normalize --repo C:\path\to\repo --scope main...feature --scope src
 ```
 
+当 branch、tag 或 commit-ish 与仓库路径同名时，使用 `ref:<value>` 或 `path:<value>` 显式消歧。例如：`--scope ref:src` 审查 `src` 分支，`--scope path:src` 审查 `src/` 目录。无歧义输入仍可省略前缀。
+
 调用 skill 时，可以直接描述目标：
 
 ```text

@@ -439,6 +439,18 @@ function commitishExists(repo, value) {
   }).ok;
 }
 
+function normalizePathScope(repo, input) {
+  const candidate = resolve(repo.root, input);
+  const relativePath = relative(repo.root, candidate);
+  const insideRepo = relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+  if (!insideRepo || !existsSync(candidate)) return null;
+
+  return {
+    type: statSync(candidate).isDirectory() ? "directory" : "file",
+    path: relativePath === "" ? "." : relativePath.replaceAll("\\", "/"),
+  };
+}
+
 function normalizeScope(repo, input) {
   const remote = parseRemoteReviewUrl(input);
   if (remote) {
@@ -450,6 +462,19 @@ function normalizeScope(repo, input) {
     die(`Unsupported remote review URL: ${input}`);
   }
 
+  if (input.startsWith("ref:")) {
+    const ref = input.slice("ref:".length);
+    if (!ref || !commitishExists(repo.root, ref)) die(`Invalid revision scope: ${input}`);
+    return { type: "revision", ref };
+  }
+
+  if (input.startsWith("path:")) {
+    const path = input.slice("path:".length);
+    const scope = path ? normalizePathScope(repo, path) : null;
+    if (!scope) die(`Unsupported or missing path scope: ${input}`);
+    return scope;
+  }
+
   const comparison = input.match(/^(.+)\.\.\.(.+)$/);
   if (comparison) {
     const [, base, head] = comparison;
@@ -459,19 +484,11 @@ function normalizeScope(repo, input) {
     return { type: "comparison", base, head };
   }
 
-  const candidate = resolve(repo.root, input);
-  const relativePath = relative(repo.root, candidate);
-  const insideRepo = relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
-  if (insideRepo && existsSync(candidate)) {
-    return {
-      type: statSync(candidate).isDirectory() ? "directory" : "file",
-      path: relativePath === "" ? "." : relativePath.replaceAll("\\", "/"),
-    };
-  }
-
-  if (commitishExists(repo.root, input)) {
-    return { type: "revision", ref: input };
-  }
+  const pathScope = normalizePathScope(repo, input);
+  const isRevision = commitishExists(repo.root, input);
+  if (pathScope && isRevision) die(`Ambiguous scope: ${input}; use ref:${input} or path:${input}`);
+  if (pathScope) return pathScope;
+  if (isRevision) return { type: "revision", ref: input };
 
   die(`Unsupported or missing scope: ${input}`);
 }

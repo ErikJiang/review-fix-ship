@@ -211,6 +211,32 @@ test("scope normalization deduplicates local scopes and accepts GitHub and self-
     "--run-id", "mismatch-run",
     "--scope", "https://github.com/other/project/pull/8",
   ], /does not match repository origin/);
+
+  const ambiguousRepo = createRepo(root, "ambiguous");
+  git(["-C", ambiguousRepo, "branch", "src"]);
+  reviewctlFails([
+    "scope", "normalize",
+    "--repo", ambiguousRepo,
+    "--state-home", stateHome,
+    "--run-id", "ambiguous-run",
+    "--scope", "src",
+  ], /Ambiguous scope: src; use ref:src or path:src/);
+  const explicitRef = reviewctlJson([
+    "scope", "normalize",
+    "--repo", ambiguousRepo,
+    "--state-home", stateHome,
+    "--run-id", "explicit-ref-run",
+    "--scope", "ref:src",
+  ]);
+  assert.deepEqual(explicitRef.scopes, [{ type: "revision", ref: "src" }]);
+  const explicitPath = reviewctlJson([
+    "scope", "normalize",
+    "--repo", ambiguousRepo,
+    "--state-home", stateHome,
+    "--run-id", "explicit-path-run",
+    "--scope", "path:src",
+  ]);
+  assert.deepEqual(explicitPath.scopes, [{ type: "directory", path: "src" }]);
 });
 
 test("finding recording rejects padding and low-confidence candidates", (t) => {

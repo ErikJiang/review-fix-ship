@@ -59,6 +59,7 @@ Bind one run to one repository. Accept multiple scopes and merge them into one r
 - GitLab MR URLs, including self-hosted GitLab
 
 Use `scope normalize`; do not hand-edit run state. Reject remote URLs that conflict with the repository origin when an origin exists. Treat directory and file scopes as filters over each diff target.
+When a repository path and revision have the same name, reject the ambiguous input and ask for `ref:<value>` or `path:<value>`. Keep unprefixed values for unambiguous scopes.
 
 If a PR or MR URL requires a missing provider CLI, continue local analysis where possible and report the missing adapter. Read [providers.md](references/providers.md) only when remote input or submission is involved.
 

@@ -54,6 +54,8 @@ Use $review-fix-ship to review main...feature and src/auth, return up to five
 high-value findings, and ask me which findings to handle.
 ```
 
+When a repository path and revision share a name, use `ref:<value>` or `path:<value>` to disambiguate the scope.
+
 The full workflow, optional token-saving tools, platform notes, and manual commands are documented in [skills/review-fix-ship/README.md](skills/review-fix-ship/README.md).
 
 ## Token-Efficient Tools
