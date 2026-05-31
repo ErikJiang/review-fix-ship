@@ -11,6 +11,7 @@ It supports:
 - macOS, Linux, and Windows
 
 The skill returns at most five verified review findings. After the user selects findings, it can create isolated branches or worktrees, render detailed action plans outside the target repository, implement only after plan approval, self-review the resulting diff, and prepare concise English PR or MR drafts. Local commit, push, and remote PR/MR creation each require separate confirmation.
+Each mutating create or run is bound to its displayed preview with a one-time token.
 
 ## Install
 

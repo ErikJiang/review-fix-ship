@@ -89,10 +89,11 @@ Use:
 
 ```powershell
 node "$reviewctl" workspace preview --repo <repo> --run-id <run-id> --finding-id <id> --mode <branch|worktree> [--path <path>]
-node "$reviewctl" workspace create  --repo <repo> --run-id <run-id> --finding-id <id> --mode <branch|worktree> [--path <path>] --confirm
+node "$reviewctl" workspace create  --repo <repo> --run-id <run-id> --finding-id <id> --mode <branch|worktree> [--path <path>] --preview-token <token> --confirm
 ```
 
 Never force branch creation, reset state, delete worktrees, or clean user changes.
+Each preview returns a one-time `previewToken`. Pass that token to the matching create or run command. Reject missing, stale, replayed, or parameter-mismatched tokens.
 
 ### 5. Write and Approve the Plan
 
@@ -132,11 +133,11 @@ Stage only the intended files after implementation and self-review. Do not use a
 
 ```powershell
 node "$reviewctl" commit preview --repo <repo> --run-id <run-id> --finding-id <id> --message <message>
-node "$reviewctl" commit run     --repo <repo> --run-id <run-id> --finding-id <id> --message <message> --confirm
+node "$reviewctl" commit run     --repo <repo> --run-id <run-id> --finding-id <id> --message <message> --preview-token <token> --confirm
 node "$reviewctl" push preview   --repo <repo> --run-id <run-id> --finding-id <id>
-node "$reviewctl" push run       --repo <repo> --run-id <run-id> --finding-id <id> --confirm
+node "$reviewctl" push run       --repo <repo> --run-id <run-id> --finding-id <id> --preview-token <token> --confirm
 node "$reviewctl" submit preview --repo <repo> --run-id <run-id> --finding-id <id> --provider <github|gitlab> --title <title> --body-file <file>
-node "$reviewctl" submit run     --repo <repo> --run-id <run-id> --finding-id <id> --provider <github|gitlab> --title <title> --body-file <file> --confirm
+node "$reviewctl" submit run     --repo <repo> --run-id <run-id> --finding-id <id> --provider <github|gitlab> --title <title> --body-file <file> --preview-token <token> --confirm
 ```
 
 Never call `gh pr create --dry-run`; it may still push. Never pass `--fill`, `--push`, or `--yes` to `glab mr create`. If `gh` or `glab` is missing, return the generated draft and explain the installation or authentication requirement. Do not install CLIs automatically.
