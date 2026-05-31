@@ -132,11 +132,30 @@ function writeText(file, value) {
   writeFileSync(file, value.endsWith("\n") ? value : `${value}\n`, "utf8");
 }
 
+function sanitizeOutput(value) {
+  return String(value || "")
+    .replace(/gh[opsu]_[A-Za-z0-9_]+/g, "<redacted-github-token>")
+    .replace(/glpat-[A-Za-z0-9_-]+/g, "<redacted-gitlab-token>")
+    .replace(/(https?:\/\/)[^/@\s]+@/g, "$1<redacted>@");
+}
+
+function windowsCommandQuote(value) {
+  const text = String(value);
+  if (/^[A-Za-z0-9_./:@=\\-]+$/.test(text)) return text;
+  return `"${text.replaceAll('"', '""')}"`;
+}
+
 function run(command, args, { cwd = undefined, allowFailure = false } = {}) {
-  const result = spawnSync(command, args, {
+  const useCommandShim = process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command);
+  const executable = useCommandShim ? (process.env.ComSpec || "cmd.exe") : command;
+  const executableArgs = useCommandShim
+    ? ["/d", "/s", "/c", `"${[command, ...args].map(windowsCommandQuote).join(" ")}"`]
+    : args;
+  const result = spawnSync(executable, executableArgs, {
     cwd,
     encoding: "utf8",
     windowsHide: true,
+    windowsVerbatimArguments: useCommandShim,
   });
 
   if (result.error && !allowFailure) {
@@ -146,13 +165,14 @@ function run(command, args, { cwd = undefined, allowFailure = false } = {}) {
   if ((result.status ?? 1) !== 0 && !allowFailure) {
     die(`Command failed: ${formatCommand(command, args)}`, {
       exitCode: result.status,
-      stderr: (result.stderr || "").trim(),
-      stdout: (result.stdout || "").trim(),
+      stderr: sanitizeOutput((result.stderr || "").trim()),
+      stdout: sanitizeOutput((result.stdout || "").trim()),
     });
   }
 
   return {
     ok: !result.error && result.status === 0,
+    error: result.error?.message || null,
     status: result.status,
     stdout: (result.stdout || "").trim(),
     stderr: (result.stderr || "").trim(),
@@ -255,7 +275,7 @@ function repositoryInfo(repoInput) {
     root: topLevel,
     commonDir,
     fingerprint: shortHash(normalizePathForHash(commonDir)),
-    origin: origin || null,
+    origin: origin ? sanitizeOutput(origin) : null,
     branch: branch || null,
     dirty: dirtyLines.length > 0,
     dirtyFiles: dirtyLines,
@@ -576,6 +596,8 @@ function parseRemoteReviewUrl(input) {
   }
 
   if (!["http:", "https:"].includes(url.protocol)) return null;
+  url.username = "";
+  url.password = "";
 
   const github = url.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/);
   if (github) {
@@ -904,6 +926,123 @@ function handlePreflight(options) {
 function handleToolsStatus(options) {
   const repo = repositoryInfo(required(options, "repo"));
   printJson(efficiencyTools(repo));
+}
+
+function providerConfig(provider, repo) {
+  const origin = normalizeOrigin(repo.origin);
+  if (provider === "github") {
+    return {
+      provider,
+      command: "gh",
+      host: origin?.host === "github.com" ? origin.host : "github.com",
+      authArgs: ["auth", "status", "--hostname", origin?.host === "github.com" ? origin.host : "github.com"],
+    };
+  }
+  if (provider === "gitlab") {
+    return {
+      provider,
+      command: "glab",
+      host: origin?.host?.includes("gitlab") ? origin.host : "gitlab.com",
+      authArgs: ["auth", "status", "--hostname", origin?.host?.includes("gitlab") ? origin.host : "gitlab.com"],
+    };
+  }
+  die(`Unsupported provider: ${provider}`);
+}
+
+function providerDoctor(provider, repo) {
+  const config = providerConfig(provider, repo);
+  const executable = findCommand(config.command);
+  if (!executable) return { ...config, available: false, authenticated: false, hint: `Install and authenticate ${config.command} only if remote ${provider} access is needed.` };
+  const auth = run(executable, config.authArgs, { allowFailure: true });
+  return {
+    ...config,
+    available: true,
+    version: commandVersion(config.command),
+    authenticated: auth.ok,
+    authStatus: sanitizeOutput(auth.ok ? auth.stdout : auth.stderr || auth.stdout),
+    hint: auth.ok ? null : `Authenticate ${config.command} for ${config.host}, then rerun tools doctor.`,
+  };
+}
+
+function handleToolsDoctor(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const requested = optional(options, "provider", "all");
+  if (!["github", "gitlab", "all"].includes(requested)) die("--provider must be github, gitlab, or all");
+  const providers = requested === "all" ? ["github", "gitlab"] : [requested];
+  const originAccess = repo.origin
+    ? runGit(repo.root, ["ls-remote", "--heads", "origin"], { allowFailure: true })
+    : null;
+  printJson({
+    platform: { os: process.platform, arch: process.arch, node: process.version },
+    git: { available: commandExists("git"), version: commandVersion("git") },
+    origin: {
+      configured: Boolean(repo.origin),
+      value: sanitizeOutput(repo.origin),
+      accessible: originAccess?.ok ?? null,
+      error: originAccess?.ok === false ? sanitizeOutput(originAccess.stderr || originAccess.stdout) : null,
+    },
+    providers: Object.fromEntries(providers.map((provider) => [provider, providerDoctor(provider, repo)])),
+    efficiency: efficiencyTools(repo),
+  });
+}
+
+function remoteFetchCommands(scope) {
+  if (scope.provider === "github") {
+    return {
+      command: "gh",
+      metadataArgs: ["pr", "view", scope.url, "--json", "number,title,baseRefName,headRefName,files,url"],
+      patchArgs: ["pr", "diff", scope.url],
+    };
+  }
+  return {
+    command: "glab",
+    metadataArgs: ["mr", "view", scope.url, "--output", "json"],
+    patchArgs: ["mr", "diff", scope.url],
+  };
+}
+
+function jsonOrText(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function handleRemoteFetch(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const scopes = runContext.data.scopes.filter((scope) => scope.type === "remote-review");
+  if (scopes.length === 0) die("Run has no remote review scopes");
+  const remoteReviews = scopes.map((scope) => {
+    const commands = remoteFetchCommands(scope);
+    const executable = findCommand(commands.command);
+    if (!executable) {
+      return { scope, status: "unavailable", hint: `Install and authenticate ${commands.command} only if remote ${scope.provider} analysis is needed.` };
+    }
+    const metadata = run(executable, commands.metadataArgs, { allowFailure: true });
+    const patch = run(executable, commands.patchArgs, { allowFailure: true });
+    if (!metadata.ok || !patch.ok) {
+      return {
+        scope,
+        status: "unavailable",
+        error: sanitizeOutput(metadata.stderr || patch.stderr || metadata.stdout || patch.stdout),
+        hint: `Authenticate ${commands.command} and verify access to ${scope.url}, then rerun remote fetch.`,
+      };
+    }
+    const stem = `${scope.provider}-${scope.number}`;
+    const metadataFile = join(runContext.dir, "remote", `${stem}.json`);
+    const patchFile = join(runContext.dir, "remote", `${stem}.patch`);
+    const cached = { fetchedAt: new Date().toISOString(), scope, metadata: jsonOrText(metadata.stdout) };
+    writeJson(metadataFile, cached);
+    writeText(patchFile, patch.stdout);
+    if (runContext.data.artifacts?.initialized) {
+      writeArtifactJson(runContext, join("remote", `${stem}.json`), cached);
+      writeArtifactText(runContext, join("remote", `${stem}.patch`), patch.stdout);
+    }
+    return { scope, status: "cached", metadataFile, patchFile };
+  });
+  printJson({ runId: runContext.data.id, localAnalysisAvailable: true, remoteReviews });
 }
 
 function handleArtifactsInitPreview(options) {
@@ -1485,13 +1624,14 @@ function handleSubmitRun(options) {
   requireWorkspacePhase(workspaceContext, "submit_pending");
   const spec = submitSpec(repo, workspaceContext.data, options);
   const previewContext = verifyPreview(runContext, findingId, "submit run", spec, options);
-  if (!commandExists(spec.command)) {
+  const executable = findCommand(spec.command);
+  if (!executable) {
     die(`Missing provider CLI: ${spec.command}`, {
       hint: `Install and authenticate ${spec.command}, then re-run submit preview and submit run.`,
     });
   }
   const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
-  const result = run(spec.command, spec.args, { cwd: workDir });
+  const result = run(executable, spec.args, { cwd: workDir });
   workspaceContext.data.phase = "submitted";
   workspaceContext.data.submission = result.stdout;
   saveWorkspace(workspaceContext);
@@ -1507,7 +1647,9 @@ Commands:
   preflight --repo <path>
   version
   tools status --repo <path>
+  tools doctor --repo <path> [--provider <github|gitlab|all>]
   scope normalize --repo <path> --scope <value> [--scope <value> ...]
+  remote fetch --repo <path> --run-id <id>
   artifacts init preview|run --repo <path> --run-id <id> [--track-ignore] [--preview-token <token>]
   artifacts list --repo <path> [--run-id <id>]
   artifacts show --repo <path> [--run-id <id>] [--finding-id <id>] [--kind <kind>]
@@ -1539,7 +1681,9 @@ function main(argv) {
   if (group === "version") return printJson({ version: HELPER_VERSION, schemaVersion: SCHEMA_VERSION });
   if (group === "preflight") return handlePreflight(parseArgs([action, ...rest].filter(Boolean)).options);
   if (group === "tools" && action === "status") return handleToolsStatus(options);
+  if (group === "tools" && action === "doctor") return handleToolsDoctor(options);
   if (group === "scope" && action === "normalize") return handleScopeNormalize(options);
+  if (group === "remote" && action === "fetch") return handleRemoteFetch(options);
   if (group === "artifacts" && action === "init" && rest[0] === "preview") return handleArtifactsInitPreview(parseArgs(rest.slice(1)).options);
   if (group === "artifacts" && action === "init" && rest[0] === "run") return handleArtifactsInitRun(parseArgs(rest.slice(1)).options);
   if (group === "artifacts" && action === "list") return handleArtifactsList(options);

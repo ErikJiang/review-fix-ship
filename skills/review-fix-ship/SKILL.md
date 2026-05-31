@@ -30,6 +30,7 @@ This Agent Skill supports Codex and GitHub Copilot. Read [hosts.md](references/h
    ```powershell
    node "$reviewctl" preflight --repo <repo>
    node "$reviewctl" tools status --repo <repo>
+   node "$reviewctl" tools doctor --repo <repo> [--provider <github|gitlab|all>]
    node "$reviewctl" scope normalize --repo <repo> --scope <scope> [--scope <scope> ...]
    ```
 
@@ -63,7 +64,7 @@ Bind one run to one repository. Accept multiple scopes and merge them into one r
 Use `scope normalize`; do not hand-edit run state. Reject remote URLs that conflict with the repository origin when an origin exists. Treat directory and file scopes as filters over each diff target.
 When a repository path and revision have the same name, reject the ambiguous input and ask for `ref:<value>` or `path:<value>`. Keep unprefixed values for unambiguous scopes.
 
-If a PR or MR URL requires a missing provider CLI, continue local analysis where possible and report the missing adapter. Read [providers.md](references/providers.md) only when remote input or submission is involved.
+If a PR or MR URL is present, run `tools doctor` and use `remote fetch` to cache available remote metadata and patches. If the provider CLI is missing or unauthenticated, continue local analysis where possible and report the missing adapter. Read [providers.md](references/providers.md) only when remote input or submission is involved.
 
 ### 2. Use Token-Efficient Tools
 

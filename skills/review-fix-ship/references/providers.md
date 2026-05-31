@@ -35,6 +35,24 @@ Treat `gh` and `glab` as optional. When the relevant adapter is absent:
 
 Do not install CLIs automatically.
 
+## Diagnostics and Remote Cache
+
+Before remote reads or submission, run:
+
+```text
+node scripts/reviewctl.mjs tools doctor --repo <repo> [--provider <github|gitlab|all>]
+```
+
+The diagnostic reports CLI versions, authentication status, and origin accessibility without printing credentials.
+
+After normalizing PR or MR URL scopes, cache readable metadata and patches with:
+
+```text
+node scripts/reviewctl.mjs remote fetch --repo <repo> --run-id <id>
+```
+
+Successful reads are stored under the external run directory's `remote/` folder and mirrored into initialized `.review-fix-ship/` artifacts. Missing CLIs and authentication failures preserve local analysis and return an actionable hint.
+
 ## Templates
 
 Before using bundled templates, check repository conventions:

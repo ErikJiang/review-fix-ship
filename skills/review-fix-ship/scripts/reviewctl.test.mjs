@@ -82,12 +82,22 @@ function createRepo(root, name = "repo") {
   return repo;
 }
 
-function createFakeTool(directory, name) {
+function createFakeTool(directory, name, { stdout = "fake", stderr = "", exitCode = 0 } = {}) {
   mkdirSync(directory, { recursive: true });
   const file = join(directory, process.platform === "win32" ? `${name}.CMD` : name);
-  writeFileSync(file, process.platform === "win32" ? "@echo off\r\necho fake\r\n" : "#!/bin/sh\necho fake\n", "utf8");
+  const content = process.platform === "win32"
+    ? ["@echo off", stdout ? `echo ${stdout}` : "", stderr ? `echo ${stderr} 1>&2` : "", `exit /b ${exitCode}`, ""].join("\r\n")
+    : ["#!/bin/sh", stdout ? `printf '%s\\n' '${stdout.replaceAll("'", "'\\''")}'` : "", stderr ? `printf '%s\\n' '${stderr.replaceAll("'", "'\\''")}' >&2` : "", `exit ${exitCode}`, ""].join("\n");
+  writeFileSync(file, content, "utf8");
   if (process.platform !== "win32") chmodSync(file, 0o755);
   return file;
+}
+
+function envWithPathPrefix(directory, extra = {}) {
+  const env = { ...process.env, ...extra };
+  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path") || "PATH";
+  env[pathKey] = `${directory}${delimiter}${env[pathKey] || ""}`;
+  return env;
 }
 
 function assertSameDirectory(actualPath, expectedPath) {
@@ -165,11 +175,7 @@ test("tools status detects optional accelerators and CodeGraph index state", (t)
   const caveman = join(root, "caveman");
   mkdirSync(caveman, { recursive: true });
   writeFileSync(join(caveman, "SKILL.md"), "# caveman\n", "utf8");
-  const env = {
-    ...process.env,
-    PATH: `${bin}${delimiter}${process.env.PATH || ""}`,
-    CAVEMAN_SKILL_DIR: caveman,
-  };
+  const env = envWithPathPrefix(bin, { CAVEMAN_SKILL_DIR: caveman });
 
   const before = reviewctlJson(["tools", "status", "--repo", repo], { env });
   assert.equal(before.tools.caveman.available, true);
@@ -182,6 +188,36 @@ test("tools status detects optional accelerators and CodeGraph index state", (t)
   const after = reviewctlJson(["tools", "status", "--repo", repo], { env });
   assert.equal(after.tools.codegraph.initialized, true);
   assert.match(after.recommendations.join("\n"), /Use CodeGraph directly/);
+});
+
+test("tools doctor redacts auth failures and remote fetch caches readable provider artifacts", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review fix ship ~ provider-"));
+  t.after(() => cleanup(root));
+  const stateHome = join(root, "state");
+
+  const doctorRepo = createRepo(root, "doctor");
+  const failingBin = join(root, "failing-bin");
+  createFakeTool(failingBin, "gh", { stderr: "authentication failed for gho_SECRET123", exitCode: 1 });
+  const failingEnv = envWithPathPrefix(failingBin);
+  const doctor = reviewctlJson(["tools", "doctor", "--repo", doctorRepo, "--provider", "github"], { env: failingEnv });
+  assert.equal(doctor.providers.github.available, true);
+  assert.equal(doctor.providers.github.authenticated, false);
+  assert.doesNotMatch(JSON.stringify(doctor), /gho_SECRET123/);
+  assert.match(JSON.stringify(doctor), /redacted-github-token/);
+
+  const repo = createRepo(root, "remote");
+  git(["-C", repo, "remote", "add", "origin", "https://github.com/acme/project.git"]);
+  const bin = join(root, "bin");
+  createFakeTool(bin, "gh", { stdout: "fake provider output" });
+  const env = envWithPathPrefix(bin);
+  reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "remote", "--scope", "https://github.com/acme/project/pull/7"]);
+  initializeArtifacts(repo, stateHome, "remote");
+  const fetched = reviewctlJson(["remote", "fetch", "--repo", repo, "--state-home", stateHome, "--run-id", "remote"], { env });
+  assert.equal(fetched.localAnalysisAvailable, true);
+  assert.equal(fetched.remoteReviews[0].status, "cached", JSON.stringify(fetched.remoteReviews[0]));
+  assert.equal(existsSync(fetched.remoteReviews[0].metadataFile), true);
+  assert.equal(existsSync(fetched.remoteReviews[0].patchFile), true);
+  assert.equal(existsSync(join(repo, ".review-fix-ship", "runs", "remote", "remote", "github-7.patch")), true);
 });
 
 test("repository-local artifacts require approval, remain ignored, and expose readable reports", (t) => {
