@@ -39,6 +39,7 @@ workspace_ready -> plan_ready -> plan_approved -> implementing
 - `workspace create`, `commit run`, `push run`, and `submit run` require `--confirm`.
 - Each mutating create or run also requires the matching preview's one-time `--preview-token`; reject missing, changed, stale, or replayed approvals.
 - `commit run` requires `commit_pending`.
+- `commit preview` records an explicit repository-relative file allowlist; `commit run` rejects staged files unless the set matches exactly.
 - `push run` requires `push_pending`.
 - `submit run` requires `submit_pending`.
 - Repository file edits are allowed only after `plan_approved`.

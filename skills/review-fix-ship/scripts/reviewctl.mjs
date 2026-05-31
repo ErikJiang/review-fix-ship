@@ -615,6 +615,30 @@ function ensureWorkspaceCheckedOut(repo, workspace) {
   return workDir;
 }
 
+function repositoryFile(workDir, input) {
+  const file = relative(workDir, resolve(workDir, input));
+  const insideRepo = file !== "" && !file.startsWith("..") && !isAbsolute(file);
+  if (!insideRepo) die(`Commit file must be inside the workspace: ${input}`);
+  return file.replaceAll("\\", "/");
+}
+
+function uniqueSorted(items) {
+  return [...new Set(items)].sort();
+}
+
+function stagedFiles(workDir) {
+  return uniqueSorted(
+    runGit(workDir, ["diff", "--cached", "--name-only", "-z"]).stdout
+      .split("\0")
+      .filter(Boolean),
+  );
+}
+
+function fileSetDifference(left, right) {
+  const rightSet = new Set(right);
+  return left.filter((item) => !rightSet.has(item));
+}
+
 function listText(items, fallback = "- None specified") {
   return items.length ? items.map((item) => `- ${item}`).join("\n") : fallback;
 }
@@ -995,14 +1019,17 @@ function handleCommitPreview(options) {
   requireWorkspacePhase(workspaceContext, ["self_reviewed", "commit_pending"]);
   const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
   const message = required(options, "message");
-  const previewToken = recordPreview(runContext, findingId, "commit run", { message });
+  const approvedFiles = uniqueSorted(values(options, "file").map((file) => repositoryFile(workDir, String(file))));
+  if (approvedFiles.length === 0) die("Provide at least one --file for the intended commit");
+  const previewToken = recordPreview(runContext, findingId, "commit run", { message, approvedFiles });
   printJson({
     action: "commit",
     findingId,
     previewToken,
     command: formatCommand("git", ["-C", workDir, "commit", "-m", message]),
     changes: runGit(workDir, ["status", "--porcelain"]).stdout.split(/\r?\n/).filter(Boolean),
-    stagedFiles: runGit(workDir, ["diff", "--cached", "--name-only"]).stdout.split(/\r?\n/).filter(Boolean),
+    approvedFiles,
+    stagedFiles: stagedFiles(workDir),
   });
 }
 
@@ -1015,11 +1042,23 @@ function handleCommitRun(options) {
   requireWorkspacePhase(workspaceContext, "commit_pending");
   const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
   const message = required(options, "message");
-  const previewContext = verifyPreview(runContext, findingId, "commit run", { message }, options);
+  const approvedFiles = uniqueSorted(values(options, "file").map((file) => repositoryFile(workDir, String(file))));
+  if (approvedFiles.length === 0) die("Provide at least one --file matching the approved commit preview");
+  const previewContext = verifyPreview(runContext, findingId, "commit run", { message, approvedFiles }, options);
   const changes = runGit(workDir, ["status", "--porcelain"]).stdout;
   if (!changes) die("No changes to commit");
-  const stagedFiles = runGit(workDir, ["diff", "--cached", "--name-only"]).stdout;
-  if (!stagedFiles) die("No staged changes to commit; stage the intended files explicitly before committing");
+  const actualStagedFiles = stagedFiles(workDir);
+  if (actualStagedFiles.length === 0) die("No staged changes to commit; stage the intended files explicitly before committing");
+  const missingFiles = fileSetDifference(approvedFiles, actualStagedFiles);
+  const unexpectedFiles = fileSetDifference(actualStagedFiles, approvedFiles);
+  if (missingFiles.length || unexpectedFiles.length) {
+    die("Staged files do not match the approved commit files", {
+      approvedFiles,
+      stagedFiles: actualStagedFiles,
+      missingFiles,
+      unexpectedFiles,
+    });
+  }
   runGit(workDir, ["commit", "-m", message]);
   workspaceContext.data.phase = "committed";
   workspaceContext.data.commit = runGit(workDir, ["rev-parse", "HEAD"]).stdout;
@@ -1152,7 +1191,7 @@ Commands:
   workspace preview|create --repo <path> --run-id <id> --finding-id <id> --mode <branch|worktree> [--preview-token <token>]
   plan render --repo <path> --run-id <id> --finding-id <id> --title <text> --finding <text> --step <text> --test <text>
   draft render --repo <path> --run-id <id> --finding-id <id> --provider <github|gitlab> --title <text> --summary <text> --change <text> --testing <text>
-  commit preview|run --repo <path> --run-id <id> --finding-id <id> --message <text> [--preview-token <token>]
+  commit preview|run --repo <path> --run-id <id> --finding-id <id> --message <text> --file <path> [--file <path> ...] [--preview-token <token>]
   push preview|run --repo <path> --run-id <id> --finding-id <id> [--preview-token <token>]
   submit preview|run --repo <path> --run-id <id> --finding-id <id> --provider <github|gitlab> --title <text> --body-file <file> [--preview-token <token>]
 

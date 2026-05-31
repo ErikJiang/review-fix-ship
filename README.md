@@ -13,6 +13,7 @@ It supports:
 The skill returns at most five verified review findings. After the user selects findings, it can create isolated branches or worktrees, render detailed action plans outside the target repository, implement only after plan approval, self-review the resulting diff, and prepare concise English PR or MR drafts. Local commit, push, and remote PR/MR creation each require separate confirmation.
 Repair workspace start refs are stored separately from later PR or MR target branches, so fixes for `base...head` reviews start from `head` and target `base`.
 Each mutating create or run is bound to its displayed preview with a one-time token.
+Commit execution also rejects staged files unless they exactly match the explicit allowlist shown during commit preview.
 
 ## Install
 

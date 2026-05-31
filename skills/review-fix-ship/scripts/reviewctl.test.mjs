@@ -447,6 +447,11 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
   const findings = join(root, "findings.json");
   const worktree = join(root, "worktree");
   writeJson(findings, [finding()]);
+  writeFileSync(join(repo, "src", "delete.txt"), "delete\n", "utf8");
+  writeFileSync(join(repo, "src", "rename.txt"), "rename\n", "utf8");
+  writeFileSync(join(repo, "src", "file with space.txt"), "initial\n", "utf8");
+  git(["-C", repo, "add", "src/delete.txt", "src/rename.txt", "src/file with space.txt"]);
+  git(["-C", repo, "commit", "-m", "add commit allowlist fixtures"]);
 
   reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--scope", "main"]);
   reviewctlJson(["state", "record-findings", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--file", findings]);
@@ -542,6 +547,10 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
   assert.match(readFileSync(draft.bodyFile, "utf8"), /## Summary/);
 
   writeFileSync(join(worktree, "src", "example.txt"), "initial\nfallback\n", "utf8");
+  rmSync(join(worktree, "src", "delete.txt"));
+  git(["-C", worktree, "mv", "src/rename.txt", "src/renamed.txt"]);
+  writeFileSync(join(worktree, "src", "file with space.txt"), "changed\n", "utf8");
+  git(["-C", worktree, "add", "-u"]);
   git(["-C", worktree, "add", "src/example.txt"]);
   const commitPreview = reviewctlJson([
     "commit", "preview",
@@ -550,6 +559,10 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
     "--run-id", "lifecycle",
     "--finding-id", "RF-001",
     "--message", "fix(cache): handle absent entries",
+    "--file", "src/delete.txt",
+    "--file", "src/example.txt",
+    "--file", "src/file with space.txt",
+    "--file", "src/renamed.txt",
   ]);
   reviewctlJson(["state", "mark", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--finding-id", "RF-001", "--to", "commit_pending"]);
   reviewctlFails([
@@ -560,6 +573,9 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
     "--finding-id", "RF-001",
     "--message", "fix(cache): handle absent entries",
   ], /requires explicit --confirm/);
+  const unrelated = join(worktree, "src", "unrelated file.txt");
+  writeFileSync(unrelated, "unrelated\n", "utf8");
+  git(["-C", worktree, "add", "src/unrelated file.txt"]);
   reviewctlFails([
     "commit", "run",
     "--repo", repo,
@@ -567,9 +583,29 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
     "--run-id", "lifecycle",
     "--finding-id", "RF-001",
     "--message", "fix(cache): changed after preview",
+    "--file", "src/delete.txt",
+    "--file", "src/example.txt",
+    "--file", "src/file with space.txt",
+    "--file", "src/renamed.txt",
     "--preview-token", commitPreview.previewToken,
     "--confirm",
   ], /parameters changed after preview/);
+  reviewctlFails([
+    "commit", "run",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "lifecycle",
+    "--finding-id", "RF-001",
+    "--message", "fix(cache): handle absent entries",
+    "--file", "src/delete.txt",
+    "--file", "src/example.txt",
+    "--file", "src/file with space.txt",
+    "--file", "src/renamed.txt",
+    "--preview-token", commitPreview.previewToken,
+    "--confirm",
+  ], /Staged files do not match the approved commit files/);
+  git(["-C", worktree, "restore", "--staged", "src/unrelated file.txt"]);
+  rmSync(unrelated);
   reviewctlJson([
     "commit", "run",
     "--repo", repo,
@@ -577,6 +613,10 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
     "--run-id", "lifecycle",
     "--finding-id", "RF-001",
     "--message", "fix(cache): handle absent entries",
+    "--file", "src/delete.txt",
+    "--file", "src/example.txt",
+    "--file", "src/file with space.txt",
+    "--file", "src/renamed.txt",
     "--preview-token", commitPreview.previewToken,
     "--confirm",
   ]);
