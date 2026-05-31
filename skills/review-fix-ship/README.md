@@ -135,7 +135,7 @@ high-value findings, and ask me which findings to handle.
 
 5. **计划批准**：代理生成外部行动计划。用户明确批准后，状态才能进入 `plan_approved`，随后才允许编码。
 6. **编码与自检**：完成代码变更、项目原生测试和 diff 自我 review，记录 `self-reviews/RF-001.md`。
-7. **受控交付**：依次预览并单独确认 commit、push、PR/MR 创建。任何一步都不会自动跳过用户确认。
+7. **受控交付**：依次预览并单独确认 commit、push、PR/MR 创建。`commit preview` 必须通过重复 `--file <path>` 明确列出预期文件；`commit run` 会拒绝任何缺失或额外 staged 文件。任何一步都不会自动跳过用户确认。
 
 ## Token 优化工具
 

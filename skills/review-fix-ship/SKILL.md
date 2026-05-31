@@ -128,10 +128,10 @@ node "$reviewctl" draft render --repo <repo> --run-id <run-id> --finding-id <id>
 
 Require separate user approval before each mutation:
 
-Stage only the intended files after implementation and self-review. Do not use an unscoped `git add .` when unrelated changes exist.
+Stage only the intended files after implementation and self-review. Do not use an unscoped `git add .` when unrelated changes exist. Pass the intended repository-relative files to `commit preview`; `commit run` rejects staged files that do not exactly match that approved allowlist.
 
 ```powershell
-node "$reviewctl" commit preview --repo <repo> --run-id <run-id> --finding-id <id> --message <message>
+node "$reviewctl" commit preview --repo <repo> --run-id <run-id> --finding-id <id> --message <message> --file <path> [--file <path> ...]
 node "$reviewctl" commit run     --repo <repo> --run-id <run-id> --finding-id <id> --message <message> --confirm
 node "$reviewctl" push preview   --repo <repo> --run-id <run-id> --finding-id <id>
 node "$reviewctl" push run       --repo <repo> --run-id <run-id> --finding-id <id> --confirm
