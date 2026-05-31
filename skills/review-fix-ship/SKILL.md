@@ -37,14 +37,16 @@ This Agent Skill supports Codex and GitHub Copilot. Read [hosts.md](references/h
 
 4. Use the returned `runId` for all later commands. Read [review-rubric.md](references/review-rubric.md) before producing findings and [output-contracts.md](references/output-contracts.md) before recording them.
 
-5. Record verified findings and ask the user which IDs to handle:
+5. Initialize the ignored repository-local artifact mirror, record verified findings, and ask the user which single ID to activate:
 
    ```powershell
+   node "$reviewctl" artifacts init preview --repo <repo> --run-id <run-id>
+   node "$reviewctl" artifacts init run     --repo <repo> --run-id <run-id> --preview-token <token> --confirm
    node "$reviewctl" state record-findings --repo <repo> --run-id <run-id> --file <findings.json>
-   node "$reviewctl" state select --repo <repo> --run-id <run-id> --id <finding-id> [--id <finding-id> ...]
+   node "$reviewctl" state activate --repo <repo> --run-id <run-id> --id <finding-id>
    ```
 
-6. For every selected finding, ask whether to create a branch or worktree. Always show `workspace preview` output before asking for approval and running `workspace create --confirm`.
+6. Ask whether to create a branch or worktree for the active finding. Always show `workspace preview` output before asking for approval and running `workspace create --confirm`.
 
 ## Review Workflow
 
@@ -80,11 +82,11 @@ Review the normalized surface from five perspectives: correctness, security, rel
 
 Run a verifier pass over every candidate. Keep only findings with concrete evidence, confidence `>= 80`, and a material impact. Return at most five findings globally across all requested scopes. Rank by severity, blast radius, reproducibility, and fix leverage. Do not include style-only comments or speculative concerns.
 
-Present the findings in Chinese for user selection. Include the evidence location, trigger, impact, recommended fix, viable alternative, and validation approach.
+Present the findings in Chinese for user selection. Include the evidence location, trigger, impact, a concise scenario with observed and expected behavior, recommended fix, viable alternative, and validation approach.
 
 ### 4. Isolate Selected Work
 
-Handle each selected finding independently unless the user explicitly requests a combined change. Ask the user to choose branch or worktree for each finding; do not apply a silent default.
+Activate exactly one finding at a time. Preserve all reports so the user can finish or defer the active finding and activate another later. Ask the user to choose branch or worktree; do not apply a silent default.
 
 Use:
 
@@ -99,7 +101,7 @@ Each preview returns a one-time `previewToken`. Pass that token to the matching 
 
 ### 5. Write and Approve the Plan
 
-Write a detailed action plan using `plan render`; include the finding evidence, implementation steps, expected files, tests, and completion criteria. The plan is saved outside the repository.
+Write a detailed action plan using `plan render`; include the finding evidence, example, implementation steps, expected files, tests, and completion criteria. The authoritative plan is saved outside the repository and mirrored under the ignored `.review-fix-ship/` directory.
 
 ```powershell
 node "$reviewctl" plan render --repo <repo> --run-id <run-id> --finding-id <id> --title <title> --finding <text> --step <step> --test <test>
