@@ -3,6 +3,11 @@
 ## Finding
 {{finding}}
 
+## Example
+- Scenario: {{exampleScenario}}
+- Observed: {{exampleObserved}}
+- Expected: {{exampleExpected}}
+
 ## Workspace
 - Finding ID: `{{findingId}}`
 - Branch: `{{branch}}`

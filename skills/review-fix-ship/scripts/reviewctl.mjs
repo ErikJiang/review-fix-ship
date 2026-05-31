@@ -6,8 +6,10 @@ import {
   accessSync,
   constants,
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   statSync,
@@ -19,6 +21,10 @@ import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const SKILL_DIR = dirname(SCRIPT_DIR);
+const HELPER_VERSION = "2.0.0";
+const SCHEMA_VERSION = 2;
+const ARTIFACT_DIRECTORY = ".review-fix-ship";
+const ARTIFACT_IGNORE_RULE = `${ARTIFACT_DIRECTORY}/`;
 const WORKSPACE_PHASES = [
   "workspace_ready",
   "plan_ready",
@@ -102,6 +108,16 @@ function printJson(value) {
 
 function readJson(file) {
   return JSON.parse(readFileSync(file, "utf8"));
+}
+
+function requireSchema(value, label) {
+  if (value.schemaVersion !== SCHEMA_VERSION) {
+    die(`${label} uses unsupported schema version`, {
+      expected: SCHEMA_VERSION,
+      actual: value.schemaVersion ?? null,
+      hint: "Create a new run with scope normalize. Pre-release schemas are intentionally not migrated.",
+    });
+  }
 }
 
 function writeJson(file, value) {
@@ -325,15 +341,31 @@ function runFile(repo, options, runId) {
   return join(runDir(repo, options, runId), "run.json");
 }
 
+function latestRunId(repo, options) {
+  const directory = join(repoStateDir(repo, options), "runs");
+  if (!existsSync(directory)) die("No runs found for repository");
+  const runIds = readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  if (runIds.length === 0) die("No runs found for repository");
+  return runIds.at(-1);
+}
+
 function loadRun(repo, options, runId) {
   const file = runFile(repo, options, runId);
   if (!existsSync(file)) die(`Run not found: ${runId}`, { file });
-  return { file, dir: dirname(file), data: readJson(file) };
+  const data = readJson(file);
+  requireSchema(data, `Run ${runId}`);
+  return { file, dir: dirname(file), data };
 }
 
 function saveRun(runContext) {
   runContext.data.updatedAt = new Date().toISOString();
   writeJson(runContext.file, runContext.data);
+  if (runContext.data.artifacts?.initialized) {
+    for (const root of artifactRoots(runContext)) writeJson(join(root, "run.json"), runContext.data);
+  }
 }
 
 function workspaceFile(runContext, findingId) {
@@ -343,7 +375,9 @@ function workspaceFile(runContext, findingId) {
 function loadWorkspace(runContext, findingId) {
   const file = workspaceFile(runContext, findingId);
   if (!existsSync(file)) die(`Workspace not found for finding: ${findingId}`, { file });
-  return { file, data: readJson(file) };
+  const data = readJson(file);
+  requireSchema(data, `Workspace ${findingId}`);
+  return { file, data };
 }
 
 function saveWorkspace(workspaceContext) {
@@ -358,7 +392,7 @@ function previewFile(runContext, findingId, action) {
 function recordPreview(runContext, findingId, action, spec) {
   const token = randomBytes(16).toString("hex");
   writeJson(previewFile(runContext, findingId, action), {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     findingId,
     action,
     token,
@@ -387,6 +421,120 @@ function verifyPreview(runContext, findingId, action, spec, options) {
 function consumePreview(previewContext) {
   previewContext.data.consumedAt = new Date().toISOString();
   writeJson(previewContext.file, previewContext.data);
+}
+
+function artifactSourceRoot(repo, runId) {
+  return join(repo.root, ARTIFACT_DIRECTORY, "runs", runId);
+}
+
+function ensureArtifactsInitialized(runContext) {
+  if (!runContext.data.artifacts?.initialized) {
+    die("Initialize repository-local artifacts before recording findings", {
+      hint: "Run artifacts init preview, review the target paths, then run artifacts init run --preview-token <token> --confirm.",
+    });
+  }
+  return runContext.data.artifacts;
+}
+
+function artifactRoots(runContext) {
+  const artifacts = ensureArtifactsInitialized(runContext);
+  return [...new Set([
+    artifacts.sourceRoot,
+    ...Object.values(artifacts.workspaceRoots || {}),
+  ])];
+}
+
+function writeArtifactText(runContext, relativePath, content) {
+  for (const root of artifactRoots(runContext)) writeText(join(root, relativePath), content);
+}
+
+function writeArtifactJson(runContext, relativePath, value) {
+  for (const root of artifactRoots(runContext)) writeJson(join(root, relativePath), value);
+}
+
+function findingMarkdown(finding) {
+  return `# ${finding.id}: ${finding.title}
+
+## Summary
+- Severity: \`${finding.severity}\`
+- Confidence: \`${finding.confidence}\`
+- Value score: \`${finding.valueScore}\`
+
+## Evidence
+${finding.evidence.map((item) => `- \`${item.path}${item.line ? `:${item.line}` : ""}\`: ${item.detail}`).join("\n")}
+
+## Trigger
+${finding.trigger}
+
+## Impact
+${finding.impact}
+
+## Example
+- Scenario: ${finding.example.scenario}
+- Observed: ${finding.example.observed}
+- Expected: ${finding.example.expected}
+
+## Recommended Fix
+${finding.recommendedFix}
+
+## Alternative Fix
+${finding.alternativeFix || "None specified."}
+
+## Validation
+${listText(finding.validation)}
+`;
+}
+
+function writeFindingsArtifacts(runContext, findings) {
+  const summary = `# Review Findings
+
+| ID | Severity | Confidence | Value | Title |
+| --- | --- | ---: | ---: | --- |
+${findings.map((finding) => `| ${finding.id} | ${finding.severity} | ${finding.confidence} | ${finding.valueScore} | ${finding.title} |`).join("\n")}
+`;
+  writeArtifactText(runContext, "findings.md", summary);
+  writeArtifactJson(runContext, "findings.json", findings);
+  for (const finding of findings) writeArtifactText(runContext, join("findings", `${finding.id}.md`), findingMarkdown(finding));
+}
+
+function artifactInitSpec(repo, runContext, options) {
+  const trackIgnore = flag(options, "track-ignore");
+  return {
+    artifactRoot: artifactSourceRoot(repo, runContext.data.id),
+    ignoreFile: trackIgnore ? join(repo.root, ".gitignore") : join(repo.commonDir, "info", "exclude"),
+    ignoreRule: ARTIFACT_IGNORE_RULE,
+    trackIgnore,
+  };
+}
+
+function ensureIgnoreRule(file, rule) {
+  const current = existsSync(file) ? readFileSync(file, "utf8") : "";
+  const lines = current.split(/\r?\n/);
+  if (lines.includes(rule)) return false;
+  const prefix = current && !current.endsWith("\n") ? `${current}\n` : current;
+  writeText(file, `${prefix}${rule}`);
+  return true;
+}
+
+function mirrorArtifactsToWorkspace(runContext, findingId, workspacePath) {
+  const artifacts = ensureArtifactsInitialized(runContext);
+  const target = join(workspacePath, ARTIFACT_DIRECTORY, "runs", runContext.data.id);
+  if (resolve(target) !== resolve(artifacts.sourceRoot)) {
+    cpSync(artifacts.sourceRoot, target, { recursive: true, force: true });
+  }
+  artifacts.workspaceRoots ||= {};
+  artifacts.workspaceRoots[findingId] = target;
+  saveRun(runContext);
+  return target;
+}
+
+function artifactFiles(root, prefix = "") {
+  if (!existsSync(root)) return [];
+  const entries = readdirSync(root, { withFileTypes: true });
+  return entries.flatMap((entry) => {
+    const child = join(prefix, entry.name);
+    return entry.isDirectory() ? artifactFiles(join(root, entry.name), child) : [child.replaceAll("\\", "/")];
+  });
 }
 
 function nextRunId() {
@@ -580,16 +728,31 @@ function findingById(runContext, findingId) {
   return finding;
 }
 
-function selectedIds(runContext) {
-  const file = join(runContext.dir, "selection.json");
-  if (!existsSync(file)) die("Findings have not been selected");
-  return readJson(file).findingIds;
+function ensureActive(runContext, findingId) {
+  if (runContext.data.activeFindingId !== findingId) {
+    die(`Finding is not active: ${findingId}`, {
+      activeFindingId: runContext.data.activeFindingId || null,
+      hint: "Finish or defer the current finding, then activate exactly one finding.",
+    });
+  }
 }
 
-function ensureSelected(runContext, findingId) {
-  if (!selectedIds(runContext).includes(findingId)) {
-    die(`Finding is not selected: ${findingId}`);
-  }
+function findingStatusEntries(runContext) {
+  return Object.entries(runContext.data.findingStates || {});
+}
+
+function completedFinding(runContext, findingId, outcome) {
+  ensureActive(runContext, findingId);
+  const state = runContext.data.findingStates[findingId];
+  state.status = "completed";
+  state.outcome = outcome;
+  state.completedAt = new Date().toISOString();
+  runContext.data.activeFindingId = null;
+  runContext.data.phase = findingStatusEntries(runContext).every(([, value]) => value.status === "completed")
+    ? "completed"
+    : "idle";
+  saveRun(runContext);
+  return state;
 }
 
 function ensureConfirmed(options, action) {
@@ -713,6 +876,12 @@ function validateFindings(findings) {
     for (const field of ["trigger", "impact", "recommendedFix"]) {
       if (!finding[field]) die(`Finding ${finding.id} is missing ${field}`);
     }
+    if (!finding.example || typeof finding.example !== "object") {
+      die(`Finding ${finding.id} is missing example`);
+    }
+    for (const field of ["scenario", "observed", "expected"]) {
+      if (!finding.example[field]) die(`Finding ${finding.id} example is missing ${field}`);
+    }
     if (!Array.isArray(finding.validation) || finding.validation.length === 0) {
       die(`Finding ${finding.id} must include validation steps`);
     }
@@ -737,6 +906,65 @@ function handleToolsStatus(options) {
   printJson(efficiencyTools(repo));
 }
 
+function handleArtifactsInitPreview(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const spec = artifactInitSpec(repo, runContext, options);
+  const previewToken = recordPreview(runContext, "run", "artifacts init", spec);
+  printJson({ action: "artifacts init", previewToken, ...spec });
+}
+
+function handleArtifactsInitRun(options) {
+  ensureConfirmed(options, "artifacts init run");
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const spec = artifactInitSpec(repo, runContext, options);
+  const previewContext = verifyPreview(runContext, "run", "artifacts init", spec, options);
+  const ignoreUpdated = ensureIgnoreRule(spec.ignoreFile, spec.ignoreRule);
+  mkdirSync(spec.artifactRoot, { recursive: true });
+  runContext.data.artifacts = {
+    initialized: true,
+    sourceRoot: spec.artifactRoot,
+    ignoreFile: spec.ignoreFile,
+    ignoreRule: spec.ignoreRule,
+    trackIgnore: spec.trackIgnore,
+    workspaceRoots: runContext.data.artifacts?.workspaceRoots || {},
+  };
+  saveRun(runContext);
+  consumePreview(previewContext);
+  printJson({ action: "artifacts init", phase: "initialized", ignoreUpdated, artifacts: runContext.data.artifacts });
+}
+
+function handleArtifactsList(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runId = optional(options, "run-id") || latestRunId(repo, options);
+  const runContext = loadRun(repo, options, runId);
+  const roots = artifactRoots(runContext).map((root) => ({ root, files: artifactFiles(root) }));
+  printJson({ runId, roots });
+}
+
+function handleArtifactsShow(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runId = optional(options, "run-id") || latestRunId(repo, options);
+  const runContext = loadRun(repo, options, runId);
+  const findingId = optional(options, "finding-id");
+  const kind = optional(options, "kind", findingId ? "finding" : "summary");
+  const provider = optional(options, "provider", "github");
+  const relativePath = {
+    summary: "findings.md",
+    snapshot: "findings.json",
+    finding: findingId ? join("findings", `${findingId}.md`) : null,
+    plan: findingId ? join("workspaces", findingId, "plan.md") : null,
+    "self-review": findingId ? join("workspaces", findingId, "self-review.md") : null,
+    draft: findingId ? join("workspaces", findingId, `change-request-${provider}.md`) : null,
+  }[kind];
+  if (!relativePath) die(`Unsupported artifact kind or missing --finding-id: ${kind}`);
+  const roots = artifactRoots(runContext);
+  const file = roots.map((root) => join(root, relativePath)).find((candidate) => existsSync(candidate));
+  if (!file) die(`Artifact not found: ${relativePath}`);
+  printJson({ runId, findingId: findingId || null, kind, file, content: readFileSync(file, "utf8") });
+}
+
 function handleScopeNormalize(options) {
   const repo = repositoryInfo(required(options, "repo"));
   const requestedScopes = values(options, "scope").map(String);
@@ -756,7 +984,8 @@ function handleScopeNormalize(options) {
     file,
     dir: dirname(file),
     data: {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
+      helperVersion: HELPER_VERSION,
       id: runId,
       repository: repo,
       phase: "scoped",
@@ -773,19 +1002,33 @@ function handleScopeNormalize(options) {
 
 function handleStateStatus(options) {
   const repo = repositoryInfo(required(options, "repo"));
-  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const runId = optional(options, "run-id") || latestRunId(repo, options);
+  const runContext = loadRun(repo, options, runId);
   const workspaceDirectory = join(runContext.dir, "workspaces");
   const workspaces = [];
 
   if (existsSync(workspaceDirectory)) {
-    for (const findingId of runContext.data.selectedFindingIds || []) {
+    for (const findingId of runContext.data.workspaceFindingIds || []) {
       const file = workspaceFile(runContext, findingId);
-      if (existsSync(file)) workspaces.push(readJson(file));
+      if (existsSync(file)) {
+        const workspace = readJson(file);
+        requireSchema(workspace, `Workspace ${findingId}`);
+        workspaces.push(workspace);
+      }
     }
   }
 
+  const states = findingStatusEntries(runContext);
   printJson({
     stateDirectory: runContext.dir,
+    artifactRoots: runContext.data.artifacts?.initialized ? artifactRoots(runContext) : [],
+    activeFindingId: runContext.data.activeFindingId || null,
+    availableFindingIds: states.filter(([, state]) => state.status === "available").map(([id]) => id),
+    completedFindingIds: states.filter(([, state]) => state.status === "completed").map(([id]) => id),
+    deferredFindingIds: states.filter(([, state]) => state.status === "deferred").map(([id]) => id),
+    nextAction: runContext.data.artifacts?.initialized
+      ? (runContext.data.activeFindingId ? `Continue ${runContext.data.activeFindingId}` : "Activate one available or deferred finding")
+      : "Initialize repository-local artifacts",
     run: runContext.data,
     workspaces,
   });
@@ -798,31 +1041,76 @@ function handleRecordFindings(options) {
   const source = resolve(required(options, "file"));
   const findings = readJson(source);
   validateFindings(findings);
+  ensureArtifactsInitialized(runContext);
   writeJson(join(runContext.dir, "findings.json"), findings);
   runContext.data.phase = "findings_ready";
   runContext.data.findingCount = findings.length;
+  runContext.data.findingStates = Object.fromEntries(findings.map((finding) => [finding.id, { status: "available" }]));
+  runContext.data.workspaceFindingIds = [];
   saveRun(runContext);
+  writeFindingsArtifacts(runContext, findings);
   printJson({ runId: runContext.data.id, phase: runContext.data.phase, findingCount: findings.length });
 }
 
-function handleSelect(options) {
+function activateFinding(runContext, findingId) {
+  if (runContext.data.activeFindingId) die(`Finding is already active: ${runContext.data.activeFindingId}`);
+  requireRunPhase(runContext, ["findings_ready", "idle"]);
+  findingById(runContext, findingId);
+  const state = runContext.data.findingStates?.[findingId];
+  if (!state || !["available", "deferred"].includes(state.status)) {
+    die(`Finding cannot be activated: ${findingId}`, { status: state?.status || null });
+  }
+  state.status = "active";
+  state.activatedAt = new Date().toISOString();
+  runContext.data.activeFindingId = findingId;
+  runContext.data.phase = "active";
+  writeJson(join(runContext.dir, "selection.json"), { activeFindingId: findingId });
+  saveRun(runContext);
+}
+
+function handleActivate(options, { deprecated = false } = {}) {
   const repo = repositoryInfo(required(options, "repo"));
   const runContext = loadRun(repo, options, required(options, "run-id"));
-  requireRunPhase(runContext, "findings_ready");
   const ids = [...new Set(values(options, "id").map(String))];
-  if (ids.length === 0) die("Select at least one --id");
-  ids.forEach((id) => findingById(runContext, id));
-  writeJson(join(runContext.dir, "selection.json"), { findingIds: ids });
-  runContext.data.phase = "selected";
-  runContext.data.selectedFindingIds = ids;
+  if (ids.length !== 1) die("Activate exactly one --id");
+  activateFinding(runContext, ids[0]);
+  printJson({ runId: runContext.data.id, phase: runContext.data.phase, activeFindingId: ids[0], deprecated });
+}
+
+function handleStateFinish(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const findingId = required(options, "finding-id");
+  const outcome = required(options, "outcome");
+  if (!["committed", "pushed", "submitted"].includes(outcome)) die("--outcome must be committed, pushed, or submitted");
+  const workspaceContext = loadWorkspace(runContext, findingId);
+  if (!phaseAtLeast(workspaceContext.data.phase, outcome)) {
+    die(`Workspace has not reached ${outcome}`, { actual: workspaceContext.data.phase });
+  }
+  const state = completedFinding(runContext, findingId, outcome);
+  printJson({ findingId, phase: runContext.data.phase, findingStatus: state.status, outcome });
+}
+
+function handleStateDefer(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const findingId = required(options, "finding-id");
+  ensureActive(runContext, findingId);
+  const state = runContext.data.findingStates[findingId];
+  state.status = "deferred";
+  state.reason = required(options, "reason");
+  state.deferredAt = new Date().toISOString();
+  runContext.data.activeFindingId = null;
+  runContext.data.phase = "idle";
   saveRun(runContext);
-  printJson({ runId: runContext.data.id, phase: runContext.data.phase, findingIds: ids });
+  printJson({ findingId, phase: runContext.data.phase, findingStatus: state.status });
 }
 
 function handleStateMark(options) {
   const repo = repositoryInfo(required(options, "repo"));
   const runContext = loadRun(repo, options, required(options, "run-id"));
   const findingId = required(options, "finding-id");
+  ensureActive(runContext, findingId);
   const workspaceContext = loadWorkspace(runContext, findingId);
   const target = required(options, "to");
   const currentIndex = WORKSPACE_PHASES.indexOf(workspaceContext.data.phase);
@@ -846,6 +1134,7 @@ function handleStateMark(options) {
     const selfReviewTarget = join(runContext.dir, "self-reviews", `${findingId}.md`);
     mkdirSync(dirname(selfReviewTarget), { recursive: true });
     copyFileSync(selfReviewSource, selfReviewTarget);
+    writeArtifactText(runContext, join("workspaces", findingId, "self-review.md"), readFileSync(selfReviewSource, "utf8"));
   }
 
   workspaceContext.data.phase = target;
@@ -883,9 +1172,9 @@ function workspaceRefs(repo, runContext, options) {
 }
 
 function workspaceSpec(repo, runContext, options) {
-  requireRunPhase(runContext, "selected");
+  requireRunPhase(runContext, "active");
   const findingId = required(options, "finding-id");
-  ensureSelected(runContext, findingId);
+  ensureActive(runContext, findingId);
   const finding = findingById(runContext, findingId);
   const mode = required(options, "mode");
   if (!["branch", "worktree"].includes(mode)) die("--mode must be branch or worktree");
@@ -946,7 +1235,7 @@ function handleWorkspaceCreate(options) {
   const workspaceContext = {
     file: workspaceFile(runContext, spec.findingId),
     data: {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       findingId: spec.findingId,
       mode: spec.mode,
       branch: spec.branch,
@@ -959,6 +1248,10 @@ function handleWorkspaceCreate(options) {
     },
   };
   saveWorkspace(workspaceContext);
+  if (!runContext.data.workspaceFindingIds.includes(spec.findingId)) runContext.data.workspaceFindingIds.push(spec.findingId);
+  const artifactRoot = mirrorArtifactsToWorkspace(runContext, spec.findingId, spec.path);
+  workspaceContext.data.artifactRoot = artifactRoot;
+  saveWorkspace(workspaceContext);
   consumePreview(previewContext);
   printJson({ findingId: spec.findingId, phase: "workspace_ready", workspace: workspaceContext.data });
 }
@@ -967,7 +1260,9 @@ function handlePlanRender(options) {
   const repo = repositoryInfo(required(options, "repo"));
   const runContext = loadRun(repo, options, required(options, "run-id"));
   const findingId = required(options, "finding-id");
+  ensureActive(runContext, findingId);
   const workspaceContext = loadWorkspace(runContext, findingId);
+  const finding = findingById(runContext, findingId);
   requireWorkspacePhase(workspaceContext, ["workspace_ready", "plan_ready"]);
   const steps = values(options, "step").map(String);
   const tests = values(options, "test").map(String);
@@ -976,6 +1271,9 @@ function handlePlanRender(options) {
   const content = render(asset("action-plan.md"), {
     title: required(options, "title"),
     finding: required(options, "finding"),
+    exampleScenario: finding.example.scenario,
+    exampleObserved: finding.example.observed,
+    exampleExpected: finding.example.expected,
     findingId,
     branch: workspaceContext.data.branch,
     workspace: workspaceContext.data.path,
@@ -986,6 +1284,7 @@ function handlePlanRender(options) {
   });
   const planFile = join(runContext.dir, "plans", `${findingId}.md`);
   writeText(planFile, content);
+  writeArtifactText(runContext, join("workspaces", findingId, "plan.md"), content);
   workspaceContext.data.phase = "plan_ready";
   workspaceContext.data.planFile = planFile;
   saveWorkspace(workspaceContext);
@@ -996,6 +1295,7 @@ function handleDraftRender(options) {
   const repo = repositoryInfo(required(options, "repo"));
   const runContext = loadRun(repo, options, required(options, "run-id"));
   const findingId = required(options, "finding-id");
+  ensureActive(runContext, findingId);
   const workspaceContext = loadWorkspace(runContext, findingId);
   if (!phaseAtLeast(workspaceContext.data.phase, "self_reviewed")) {
     die("Complete self-review before rendering a change request draft");
@@ -1013,6 +1313,7 @@ function handleDraftRender(options) {
   });
   const output = join(runContext.dir, "change-requests", `${findingId}-${provider}.md`);
   writeText(output, content);
+  writeArtifactText(runContext, join("workspaces", findingId, `change-request-${provider}.md`), content);
   const title = required(options, "title");
   writeJson(join(runContext.dir, "change-requests", `${findingId}-${provider}.json`), {
     provider,
@@ -1026,6 +1327,7 @@ function handleCommitPreview(options) {
   const repo = repositoryInfo(required(options, "repo"));
   const runContext = loadRun(repo, options, required(options, "run-id"));
   const findingId = required(options, "finding-id");
+  ensureActive(runContext, findingId);
   const workspaceContext = loadWorkspace(runContext, findingId);
   requireWorkspacePhase(workspaceContext, ["self_reviewed", "commit_pending"]);
   const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
@@ -1049,6 +1351,7 @@ function handleCommitRun(options) {
   const repo = repositoryInfo(required(options, "repo"));
   const runContext = loadRun(repo, options, required(options, "run-id"));
   const findingId = required(options, "finding-id");
+  ensureActive(runContext, findingId);
   const workspaceContext = loadWorkspace(runContext, findingId);
   requireWorkspacePhase(workspaceContext, "commit_pending");
   const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
@@ -1082,6 +1385,7 @@ function handlePushPreview(options) {
   const repo = repositoryInfo(required(options, "repo"));
   const runContext = loadRun(repo, options, required(options, "run-id"));
   const findingId = required(options, "finding-id");
+  ensureActive(runContext, findingId);
   const workspaceContext = loadWorkspace(runContext, findingId);
   requireWorkspacePhase(workspaceContext, ["committed", "push_pending"]);
   const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
@@ -1105,6 +1409,7 @@ function handlePushRun(options) {
   const repo = repositoryInfo(required(options, "repo"));
   const runContext = loadRun(repo, options, required(options, "run-id"));
   const findingId = required(options, "finding-id");
+  ensureActive(runContext, findingId);
   const workspaceContext = loadWorkspace(runContext, findingId);
   requireWorkspacePhase(workspaceContext, "push_pending");
   const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
@@ -1155,6 +1460,7 @@ function handleSubmitPreview(options) {
   const repo = repositoryInfo(required(options, "repo"));
   const runContext = loadRun(repo, options, required(options, "run-id"));
   const findingId = required(options, "finding-id");
+  ensureActive(runContext, findingId);
   const workspaceContext = loadWorkspace(runContext, findingId);
   requireWorkspacePhase(workspaceContext, ["pushed", "submit_pending"]);
   const spec = submitSpec(repo, workspaceContext.data, options);
@@ -1174,6 +1480,7 @@ function handleSubmitRun(options) {
   const repo = repositoryInfo(required(options, "repo"));
   const runContext = loadRun(repo, options, required(options, "run-id"));
   const findingId = required(options, "finding-id");
+  ensureActive(runContext, findingId);
   const workspaceContext = loadWorkspace(runContext, findingId);
   requireWorkspacePhase(workspaceContext, "submit_pending");
   const spec = submitSpec(repo, workspaceContext.data, options);
@@ -1189,7 +1496,8 @@ function handleSubmitRun(options) {
   workspaceContext.data.submission = result.stdout;
   saveWorkspace(workspaceContext);
   consumePreview(previewContext);
-  printJson({ findingId, phase: "submitted", provider: spec.provider, output: result.stdout });
+  completedFinding(runContext, findingId, "submitted");
+  printJson({ findingId, phase: "submitted", findingStatus: "completed", provider: spec.provider, output: result.stdout });
 }
 
 function printHelp() {
@@ -1197,11 +1505,18 @@ function printHelp() {
 
 Commands:
   preflight --repo <path>
+  version
   tools status --repo <path>
   scope normalize --repo <path> --scope <value> [--scope <value> ...]
-  state status --repo <path> --run-id <id>
+  artifacts init preview|run --repo <path> --run-id <id> [--track-ignore] [--preview-token <token>]
+  artifacts list --repo <path> [--run-id <id>]
+  artifacts show --repo <path> [--run-id <id>] [--finding-id <id>] [--kind <kind>]
+  state status --repo <path> [--run-id <id>]
   state record-findings --repo <path> --run-id <id> --file <findings.json>
-  state select --repo <path> --run-id <id> --id <finding-id> [--id <finding-id> ...]
+  state activate --repo <path> --run-id <id> --id <finding-id>
+  state select --repo <path> --run-id <id> --id <finding-id>
+  state finish --repo <path> --run-id <id> --finding-id <id> --outcome <committed|pushed|submitted>
+  state defer --repo <path> --run-id <id> --finding-id <id> --reason <text>
   state mark --repo <path> --run-id <id> --finding-id <id> --to <phase>
   workspace preview|create --repo <path> --run-id <id> --finding-id <id> --mode <branch|worktree> [--preview-token <token>]
   plan render --repo <path> --run-id <id> --finding-id <id> --title <text> --finding <text> --step <text> --test <text>
@@ -1221,12 +1536,20 @@ function main(argv) {
   const { options } = parseArgs(rest);
 
   if (group === "help" || group === "--help" || group === "-h") return printHelp();
+  if (group === "version") return printJson({ version: HELPER_VERSION, schemaVersion: SCHEMA_VERSION });
   if (group === "preflight") return handlePreflight(parseArgs([action, ...rest].filter(Boolean)).options);
   if (group === "tools" && action === "status") return handleToolsStatus(options);
   if (group === "scope" && action === "normalize") return handleScopeNormalize(options);
+  if (group === "artifacts" && action === "init" && rest[0] === "preview") return handleArtifactsInitPreview(parseArgs(rest.slice(1)).options);
+  if (group === "artifacts" && action === "init" && rest[0] === "run") return handleArtifactsInitRun(parseArgs(rest.slice(1)).options);
+  if (group === "artifacts" && action === "list") return handleArtifactsList(options);
+  if (group === "artifacts" && action === "show") return handleArtifactsShow(options);
   if (group === "state" && action === "status") return handleStateStatus(options);
   if (group === "state" && action === "record-findings") return handleRecordFindings(options);
-  if (group === "state" && action === "select") return handleSelect(options);
+  if (group === "state" && action === "activate") return handleActivate(options);
+  if (group === "state" && action === "select") return handleActivate(options, { deprecated: true });
+  if (group === "state" && action === "finish") return handleStateFinish(options);
+  if (group === "state" && action === "defer") return handleStateDefer(options);
   if (group === "state" && action === "mark") return handleStateMark(options);
   if (group === "workspace" && action === "preview") return handleWorkspacePreview(options);
   if (group === "workspace" && action === "create") return handleWorkspaceCreate(options);

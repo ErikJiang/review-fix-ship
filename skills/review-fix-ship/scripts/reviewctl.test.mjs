@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -108,11 +109,35 @@ function finding(overrides = {}) {
     evidence: [{ path: "src/example.txt", line: 1, detail: "The missing-entry path is not handled." }],
     trigger: "Read an absent cache key.",
     impact: "The request fails instead of returning a fallback.",
+    example: {
+      scenario: "Read a key that is not present in the cache.",
+      observed: "The request dereferences an absent entry and fails.",
+      expected: "The request returns the configured fallback.",
+    },
     recommendedFix: "Handle the absent entry before dereferencing it.",
     alternativeFix: "Return an explicit not-found result.",
     validation: ["Run the focused regression test."],
     ...overrides,
   };
+}
+
+function initializeArtifacts(repo, stateHome, runId, extra = []) {
+  const preview = reviewctlJson([
+    "artifacts", "init", "preview",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", runId,
+    ...extra,
+  ]);
+  return reviewctlJson([
+    "artifacts", "init", "run",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", runId,
+    ...extra,
+    "--preview-token", preview.previewToken,
+    "--confirm",
+  ]);
 }
 
 test("preflight reports repository status and optional provider adapters", (t) => {
@@ -157,6 +182,84 @@ test("tools status detects optional accelerators and CodeGraph index state", (t)
   const after = reviewctlJson(["tools", "status", "--repo", repo], { env });
   assert.equal(after.tools.codegraph.initialized, true);
   assert.match(after.recommendations.join("\n"), /Use CodeGraph directly/);
+});
+
+test("repository-local artifacts require approval, remain ignored, and expose readable reports", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review-fix-ship-artifacts-"));
+  t.after(() => cleanup(root));
+  const repo = createRepo(root);
+  const stateHome = join(root, "state");
+  const findings = join(root, "findings.json");
+  writeJson(findings, [finding()]);
+
+  reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "artifacts", "--scope", "main"]);
+  reviewctlFails([
+    "state", "record-findings",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "artifacts",
+    "--file", findings,
+  ], /Initialize repository-local artifacts/);
+  const initialized = initializeArtifacts(repo, stateHome, "artifacts");
+  assert.equal(initialized.ignoreUpdated, true);
+  assert.match(readFileSync(join(repo, ".git", "info", "exclude"), "utf8"), /\.review-fix-ship\//);
+  assert.equal(existsSync(join(repo, ".gitignore")), false);
+  const repeated = initializeArtifacts(repo, stateHome, "artifacts");
+  assert.equal(repeated.ignoreUpdated, false);
+
+  reviewctlJson(["state", "record-findings", "--repo", repo, "--state-home", stateHome, "--run-id", "artifacts", "--file", findings]);
+  const artifactRoot = join(repo, ".review-fix-ship", "runs", "artifacts");
+  assert.equal(existsSync(join(artifactRoot, "findings.md")), true);
+  assert.equal(existsSync(join(artifactRoot, "findings", "RF-001.md")), true);
+  const shown = reviewctlJson(["artifacts", "show", "--repo", repo, "--state-home", stateHome, "--run-id", "artifacts", "--finding-id", "RF-001"]);
+  assert.match(shown.content, /## Example/);
+  const listed = reviewctlJson(["artifacts", "list", "--repo", repo, "--state-home", stateHome, "--run-id", "artifacts"]);
+  assert.ok(listed.roots[0].files.includes("findings/RF-001.md"));
+  const latest = reviewctlJson(["state", "status", "--repo", repo, "--state-home", stateHome]);
+  assert.equal(latest.run.id, "artifacts");
+
+  reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "tracked-ignore", "--scope", "main"]);
+  const trackedPreview = reviewctlJson(["artifacts", "init", "preview", "--repo", repo, "--state-home", stateHome, "--run-id", "tracked-ignore", "--track-ignore"]);
+  assert.equal(existsSync(join(repo, ".gitignore")), false);
+  reviewctlJson(["artifacts", "init", "run", "--repo", repo, "--state-home", stateHome, "--run-id", "tracked-ignore", "--track-ignore", "--preview-token", trackedPreview.previewToken, "--confirm"]);
+  assert.match(readFileSync(join(repo, ".gitignore"), "utf8"), /\.review-fix-ship\//);
+});
+
+test("schema v2 rejects pre-release run state instead of migrating it", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review-fix-ship-schema-"));
+  t.after(() => cleanup(root));
+  const repo = createRepo(root);
+  const stateHome = join(root, "state");
+
+  const version = reviewctlJson(["version"]);
+  assert.equal(version.schemaVersion, 2);
+  reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "schema", "--scope", "main"]);
+  const status = reviewctlJson(["state", "status", "--repo", repo, "--state-home", stateHome, "--run-id", "schema"]);
+  const runFile = join(status.stateDirectory, "run.json");
+  const run = JSON.parse(readFileSync(runFile, "utf8"));
+  writeJson(runFile, { ...run, schemaVersion: 1 });
+  reviewctlFails(["state", "status", "--repo", repo, "--state-home", stateHome, "--run-id", "schema"], /unsupported schema version/);
+});
+
+test("one run activates only one finding and can defer before continuing", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review-fix-ship-serial-"));
+  t.after(() => cleanup(root));
+  const repo = createRepo(root);
+  const stateHome = join(root, "state");
+  const findings = join(root, "findings.json");
+  writeJson(findings, [finding(), finding({ id: "RF-002", title: "Second issue" })]);
+
+  reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "serial", "--scope", "main"]);
+  initializeArtifacts(repo, stateHome, "serial");
+  reviewctlJson(["state", "record-findings", "--repo", repo, "--state-home", stateHome, "--run-id", "serial", "--file", findings]);
+  reviewctlFails(["state", "select", "--repo", repo, "--state-home", stateHome, "--run-id", "serial", "--id", "RF-001", "--id", "RF-002"], /exactly one/);
+  reviewctlJson(["state", "activate", "--repo", repo, "--state-home", stateHome, "--run-id", "serial", "--id", "RF-001"]);
+  reviewctlFails(["state", "activate", "--repo", repo, "--state-home", stateHome, "--run-id", "serial", "--id", "RF-002"], /already active/);
+  reviewctlJson(["state", "defer", "--repo", repo, "--state-home", stateHome, "--run-id", "serial", "--finding-id", "RF-001", "--reason", "Handle later"]);
+  reviewctlJson(["state", "activate", "--repo", repo, "--state-home", stateHome, "--run-id", "serial", "--id", "RF-002"]);
+  const status = reviewctlJson(["state", "status", "--repo", repo, "--state-home", stateHome, "--run-id", "serial"]);
+  assert.equal(status.activeFindingId, "RF-002");
+  assert.deepEqual(status.deferredFindingIds, ["RF-001"]);
 });
 
 test("scope normalization deduplicates local scopes and accepts GitHub and self-hosted GitLab URLs", (t) => {
@@ -294,6 +397,7 @@ test("workspace preview separates comparison start ref from change request targe
   git(["-C", repo, "checkout", "main"]);
 
   reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "comparison", "--scope", "main...feature"]);
+  initializeArtifacts(repo, stateHome, "comparison");
   reviewctlJson(["state", "record-findings", "--repo", repo, "--state-home", stateHome, "--run-id", "comparison", "--file", findings]);
   reviewctlJson(["state", "select", "--repo", repo, "--state-home", stateHome, "--run-id", "comparison", "--id", "RF-001"]);
   const preview = reviewctlJson([
@@ -312,6 +416,7 @@ test("workspace preview separates comparison start ref from change request targe
   const remoteRepo = createRepo(root, "remote-review");
   git(["-C", remoteRepo, "remote", "add", "origin", "https://github.com/acme/project.git"]);
   reviewctlJson(["scope", "normalize", "--repo", remoteRepo, "--state-home", stateHome, "--run-id", "remote-review", "--scope", "https://github.com/acme/project/pull/7"]);
+  initializeArtifacts(remoteRepo, stateHome, "remote-review");
   reviewctlJson(["state", "record-findings", "--repo", remoteRepo, "--state-home", stateHome, "--run-id", "remote-review", "--file", findings]);
   reviewctlJson(["state", "select", "--repo", remoteRepo, "--state-home", stateHome, "--run-id", "remote-review", "--id", "RF-001"]);
   reviewctlFails([
@@ -345,6 +450,7 @@ test("workspace creation refuses dirty repositories unless explicitly acknowledg
   writeJson(findings, [finding()]);
 
   reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "dirty-run", "--scope", "main"]);
+  initializeArtifacts(repo, stateHome, "dirty-run");
   reviewctlJson(["state", "record-findings", "--repo", repo, "--state-home", stateHome, "--run-id", "dirty-run", "--file", findings]);
   reviewctlJson(["state", "select", "--repo", repo, "--state-home", stateHome, "--run-id", "dirty-run", "--id", "RF-001"]);
   writeFileSync(join(repo, "src", "example.txt"), "user change\n", "utf8");
@@ -371,6 +477,7 @@ test("workspace creation requires a matching one-time preview token", (t) => {
   writeJson(findings, [finding()]);
 
   reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "preview-token", "--scope", "main"]);
+  initializeArtifacts(repo, stateHome, "preview-token");
   reviewctlJson(["state", "record-findings", "--repo", repo, "--state-home", stateHome, "--run-id", "preview-token", "--file", findings]);
   reviewctlJson(["state", "select", "--repo", repo, "--state-home", stateHome, "--run-id", "preview-token", "--id", "RF-001"]);
   reviewctlFails([
@@ -447,6 +554,7 @@ test("push refuses commits added after the reviewed commit", (t) => {
   writeFileSync(selfReview, "# Self-review\n\nNo remaining issues.\n", "utf8");
 
   reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--scope", "main"]);
+  initializeArtifacts(repo, stateHome, "push-head");
   reviewctlJson(["state", "record-findings", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--file", findings]);
   reviewctlJson(["state", "select", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--id", "RF-001"]);
   const workspacePreview = reviewctlJson([
@@ -527,6 +635,7 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
   git(["-C", repo, "commit", "-m", "add commit allowlist fixtures"]);
 
   reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--scope", "main"]);
+  initializeArtifacts(repo, stateHome, "lifecycle");
   reviewctlJson(["state", "record-findings", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--file", findings]);
   reviewctlJson(["state", "select", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--id", "RF-001"]);
 
@@ -561,6 +670,8 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
     "--preview-token", workspacePreview.previewToken,
     "--confirm",
   ]);
+  const mirroredWorkspace = join(worktree, ".review-fix-ship", "runs", "lifecycle");
+  assert.equal(existsSync(join(mirroredWorkspace, "findings", "RF-001.md")), true);
 
   const plan = reviewctlJson([
     "plan", "render",
@@ -576,6 +687,7 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
     "--criterion", "The absent-entry path returns a fallback.",
   ]);
   assert.match(readFileSync(plan.planFile, "utf8"), /Approval status: `pending`/);
+  assert.match(readFileSync(join(mirroredWorkspace, "workspaces", "RF-001", "plan.md"), "utf8"), /## Example/);
   const revisedPlan = reviewctlJson([
     "plan", "render",
     "--repo", repo,
@@ -604,6 +716,7 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
     "--to", "self_reviewed",
     "--self-review-file", selfReview,
   ]);
+  assert.equal(existsSync(join(mirroredWorkspace, "workspaces", "RF-001", "self-review.md")), true);
 
   const draft = reviewctlJson([
     "draft", "render",
@@ -618,6 +731,7 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
     "--testing", "Run the focused regression test.",
   ]);
   assert.match(readFileSync(draft.bodyFile, "utf8"), /## Summary/);
+  assert.equal(existsSync(join(mirroredWorkspace, "workspaces", "RF-001", "change-request-github.md")), true);
 
   writeFileSync(join(worktree, "src", "example.txt"), "initial\nfallback\n", "utf8");
   rmSync(join(worktree, "src", "delete.txt"));
@@ -795,4 +909,9 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
 
   const status = reviewctlJson(["state", "status", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle"]);
   assert.equal(status.workspaces[0].phase, "submit_pending");
+  const finished = reviewctlJson(["state", "finish", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--finding-id", "RF-001", "--outcome", "pushed"]);
+  assert.equal(finished.findingStatus, "completed");
+  const completedStatus = reviewctlJson(["state", "status", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle"]);
+  assert.equal(completedStatus.activeFindingId, null);
+  assert.deepEqual(completedStatus.completedFindingIds, ["RF-001"]);
 });
