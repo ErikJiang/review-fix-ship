@@ -88,11 +88,12 @@ Handle each selected finding independently unless the user explicitly requests a
 Use:
 
 ```powershell
-node "$reviewctl" workspace preview --repo <repo> --run-id <run-id> --finding-id <id> --mode <branch|worktree> [--path <path>]
-node "$reviewctl" workspace create  --repo <repo> --run-id <run-id> --finding-id <id> --mode <branch|worktree> [--path <path>] --confirm
+node "$reviewctl" workspace preview --repo <repo> --run-id <run-id> --finding-id <id> --mode <branch|worktree> [--path <path>] [--start-ref <ref> --target-branch <branch>]
+node "$reviewctl" workspace create  --repo <repo> --run-id <run-id> --finding-id <id> --mode <branch|worktree> [--path <path>] [--start-ref <ref> --target-branch <branch>] --confirm
 ```
 
 Never force branch creation, reset state, delete worktrees, or clean user changes.
+For a single `base...head` comparison, create the repair workspace from `head` and target the later PR or MR at `base`. Require explicit `--start-ref` and `--target-branch` when the normalized scopes cannot determine both values safely.
 
 ### 5. Write and Approve the Plan
 

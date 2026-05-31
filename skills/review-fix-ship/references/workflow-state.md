@@ -20,6 +20,7 @@ scoped -> findings_ready -> selected
 ```
 
 Use one workspace record per selected finding after `selected`.
+Each workspace stores a repair `startRef` separately from the later PR or MR `targetBranch`. A single `base...head` comparison maps to `startRef=head` and `targetBranch=base`.
 
 ## Workspace State
 

@@ -129,9 +129,11 @@ high-value findings, and ask me which findings to handle.
 4. **隔离修复**：用户选择 branch 或 worktree。先预览，再确认创建：
 
    ```bash
-   node "$reviewctl" workspace preview --repo <repo> --run-id <run-id> --finding-id RF-001 --mode worktree
-   node "$reviewctl" workspace create  --repo <repo> --run-id <run-id> --finding-id RF-001 --mode worktree --confirm
+   node "$reviewctl" workspace preview --repo <repo> --run-id <run-id> --finding-id RF-001 --mode worktree [--start-ref <ref> --target-branch <branch>]
+   node "$reviewctl" workspace create  --repo <repo> --run-id <run-id> --finding-id RF-001 --mode worktree [--start-ref <ref> --target-branch <branch>] --confirm
    ```
+
+   单个 `base...head` comparison 会从 `head` 创建修复 workspace，并将后续 PR/MR 目标设为 `base`。混合 diff scope 或尚未读取元数据的远端 review scope 必须显式提供 `--start-ref` 与 `--target-branch`。
 
 5. **计划批准**：代理生成外部行动计划。用户明确批准后，状态才能进入 `plan_approved`，随后才允许编码。
 6. **编码与自检**：完成代码变更、项目原生测试和 diff 自我 review，记录 `self-reviews/RF-001.md`。
