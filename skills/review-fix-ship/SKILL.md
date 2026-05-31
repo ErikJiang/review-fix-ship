@@ -142,6 +142,8 @@ node "$reviewctl" submit preview --repo <repo> --run-id <run-id> --finding-id <i
 node "$reviewctl" submit run     --repo <repo> --run-id <run-id> --finding-id <id> --provider <github|gitlab> --title <title> --body-file <file> --preview-token <token> --confirm
 ```
 
+Before previewing or running a push, require the checked-out `HEAD` to equal the commit recorded by `commit run`. If the branch changed, repeat self-review and commit approval before pushing.
+
 Never call `gh pr create --dry-run`; it may still push. Never pass `--fill`, `--push`, or `--yes` to `glab mr create`. If `gh` or `glab` is missing, return the generated draft and explain the installation or authentication requirement. Do not install CLIs automatically.
 
 ## Resources

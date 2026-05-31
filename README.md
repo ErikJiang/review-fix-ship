@@ -14,6 +14,7 @@ The skill returns at most five verified review findings. After the user selects 
 Repair workspace start refs are stored separately from later PR or MR target branches, so fixes for `base...head` reviews start from `head` and target `base`.
 Each mutating create or run is bound to its displayed preview with a one-time token.
 Commit execution also rejects staged files unless they exactly match the explicit allowlist shown during commit preview.
+Push preview and execution also reject branches whose `HEAD` moved after the reviewed commit.
 
 ## Install
 

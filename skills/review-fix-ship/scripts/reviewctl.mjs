@@ -639,6 +639,17 @@ function fileSetDifference(left, right) {
   return left.filter((item) => !rightSet.has(item));
 }
 
+function ensureCommittedHead(workDir, workspace) {
+  const currentHead = runGit(workDir, ["rev-parse", "HEAD"]).stdout;
+  if (!workspace.commit || currentHead !== workspace.commit) {
+    die("Workspace HEAD changed after the reviewed commit", {
+      reviewedCommit: workspace.commit || null,
+      currentHead,
+      hint: "Repeat self-review and commit approval before pushing the updated branch.",
+    });
+  }
+}
+
 function listText(items, fallback = "- None specified") {
   return items.length ? items.map((item) => `- ${item}`).join("\n") : fallback;
 }
@@ -1074,10 +1085,12 @@ function handlePushPreview(options) {
   const workspaceContext = loadWorkspace(runContext, findingId);
   requireWorkspacePhase(workspaceContext, ["committed", "push_pending"]);
   const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
+  ensureCommittedHead(workDir, workspaceContext.data);
   const remote = optional(options, "remote", "origin");
   const previewToken = recordPreview(runContext, findingId, "push run", {
     branch: workspaceContext.data.branch,
     remote,
+    reviewedCommit: workspaceContext.data.commit,
   });
   printJson({
     action: "push",
@@ -1095,10 +1108,12 @@ function handlePushRun(options) {
   const workspaceContext = loadWorkspace(runContext, findingId);
   requireWorkspacePhase(workspaceContext, "push_pending");
   const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
+  ensureCommittedHead(workDir, workspaceContext.data);
   const remote = optional(options, "remote", "origin");
   const previewContext = verifyPreview(runContext, findingId, "push run", {
     branch: workspaceContext.data.branch,
     remote,
+    reviewedCommit: workspaceContext.data.commit,
   }, options);
   runGit(workDir, ["push", "-u", remote, workspaceContext.data.branch]);
   workspaceContext.data.phase = "pushed";
