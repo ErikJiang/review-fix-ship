@@ -365,10 +365,13 @@ function latestRunId(repo, options) {
   if (!existsSync(directory)) die("No runs found for repository");
   const runIds = readdirSync(directory, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .sort();
+    .map((entry) => ({
+      id: entry.name,
+      modifiedAt: statSync(runFile(repo, options, entry.name)).mtimeMs,
+    }))
+    .sort((left, right) => left.modifiedAt - right.modifiedAt || left.id.localeCompare(right.id));
   if (runIds.length === 0) die("No runs found for repository");
-  return runIds.at(-1);
+  return runIds.at(-1).id;
 }
 
 function loadRun(repo, options, runId) {
@@ -930,11 +933,12 @@ function handleToolsStatus(options) {
 function providerConfig(provider, repo) {
   const origin = normalizeOrigin(repo.origin);
   if (provider === "github") {
+    const host = origin?.host && !origin.host.includes("gitlab") ? origin.host : "github.com";
     return {
       provider,
       command: "gh",
-      host: origin?.host === "github.com" ? origin.host : "github.com",
-      authArgs: ["auth", "status", "--hostname", origin?.host === "github.com" ? origin.host : "github.com"],
+      host,
+      authArgs: ["auth", "status", "--hostname", host],
     };
   }
   if (provider === "gitlab") {
@@ -1140,6 +1144,7 @@ function handleScopeNormalize(options) {
 
 function handleStateStatus(options) {
   const repo = repositoryInfo(required(options, "repo"));
+  if (optional(options, "run-id") && flag(options, "latest")) die("Use either --run-id or --latest, not both");
   const runId = optional(options, "run-id") || latestRunId(repo, options);
   const runContext = loadRun(repo, options, runId);
   const workspaceDirectory = join(runContext.dir, "workspaces");
@@ -1652,7 +1657,7 @@ Commands:
   artifacts init preview|run --repo <path> --run-id <id> [--track-ignore] [--preview-token <token>]
   artifacts list --repo <path> [--run-id <id>]
   artifacts show --repo <path> [--run-id <id>] [--finding-id <id>] [--kind <kind>]
-  state status --repo <path> [--run-id <id>]
+  state status --repo <path> [--run-id <id>|--latest]
   state record-findings --repo <path> --run-id <id> --file <findings.json>
   state activate --repo <path> --run-id <id> --id <finding-id>
   state select --repo <path> --run-id <id> --id <finding-id>

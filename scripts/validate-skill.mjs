@@ -35,17 +35,27 @@ if (description.length > 1024) fail("Skill description must not exceed 1024 char
 if (/[<>]/.test(description)) fail("Skill description must not contain angle brackets");
 
 const requiredFiles = [
-  "README.md",
-  "TODO.md",
+  join("agents", "openai.yaml"),
   join("scripts", "reviewctl.mjs"),
   join("scripts", "reviewctl.test.mjs"),
   join("references", "hosts.md"),
+  join("references", "output-contracts.md"),
   join("references", "platforms.md"),
+  join("references", "providers.md"),
   join("references", "token-efficiency.md"),
+  join("references", "workflow-state.md"),
 ];
 
 for (const file of requiredFiles) {
   if (!existsSync(join(SKILL_DIR, file))) fail(`Missing required skill resource: ${file}`);
+}
+
+for (const file of ["usage.md", "roadmap.md"]) {
+  if (!existsSync(join(ROOT, "docs", file))) fail(`Missing repository documentation: docs/${file}`);
+}
+
+for (const file of ["README.md", "TODO.md"]) {
+  if (existsSync(join(SKILL_DIR, file))) fail(`Move non-runtime documentation outside the publishable skill: ${file}`);
 }
 
 process.stdout.write(`Validated ${name}: ${requiredFiles.length + 1} required files present\n`);

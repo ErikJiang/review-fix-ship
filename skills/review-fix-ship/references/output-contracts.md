@@ -42,7 +42,7 @@ Render one plan for the active finding. Include evidence, the concise example, w
 
 ## Self-Review
 
-Write `self-reviews/<finding-id>.md` after implementation. Include:
+Write authoritative `self-reviews/<finding-id>.md` after implementation and mirror it to `.review-fix-ship/runs/<run-id>/workspaces/<finding-id>/self-review.md`. Include:
 
 - Diff reviewed
 - Checks executed and outcomes
@@ -68,3 +68,4 @@ type(scope): concise summary
 ```
 
 Add `## Risk` only when useful. Prefer the repository's own template when available.
+Mirror rendered drafts to `.review-fix-ship/runs/<run-id>/workspaces/<finding-id>/change-request-<provider>.md`.

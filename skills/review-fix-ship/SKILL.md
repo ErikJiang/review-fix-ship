@@ -1,6 +1,6 @@
 ---
 name: review-fix-ship
-description: Find up to five verified high-value code review findings across Git branches, comparisons, directories, files, GitHub PR URLs, or GitLab MR URLs; optionally use caveman, rtk, and CodeGraph to reduce token consumption; let the user select findings; create guarded branches or worktrees; write actionable fix plans; implement only after plan approval; self-review changes; and prepare concise English PR or MR drafts with explicit confirmation gates for commit, push, and remote creation. Use when Codex or GitHub Copilot needs a macOS, Linux, or Windows compatible end-to-end review, planning, repair, or PR/MR preparation workflow without modifying the target repository before the user approves each gated phase.
+description: Find up to five verified high-value code review findings with concise examples across Git branches, comparisons, directories, files, GitHub PR URLs, or GitLab MR URLs; optionally use caveman, rtk, and CodeGraph to reduce token consumption; preserve the full report while activating one finding at a time; create guarded branches or worktrees; implement only after plan approval; self-review changes; and prepare concise English PR or MR drafts with explicit confirmation gates for commit, push, and remote creation. Use when Codex or GitHub Copilot needs a macOS, Linux, or Windows compatible serial review, repair, or PR/MR preparation workflow.
 ---
 
 # Review Fix Ship
@@ -113,7 +113,7 @@ Show the rendered plan and wait for explicit user approval before marking `plan_
 
 ### 6. Implement and Self-Review
 
-Enter the selected workspace, mark `implementing`, implement the approved plan, and run repository-native lint, tests, and build checks. Then inspect the complete diff for correctness, maintainability, security, regressions, and missing tests. Fix any issues and repeat checks.
+Enter the active workspace, mark `implementing`, implement the approved plan, and run repository-native lint, tests, and build checks. Then inspect the complete diff for correctness, maintainability, security, regressions, and missing tests. Fix any issues and repeat checks.
 
 Record a concise self-review file under the run directory, then advance:
 
@@ -123,6 +123,7 @@ node "$reviewctl" state mark --repo <repo> --run-id <run-id> --finding-id <id> -
 ```
 
 Read [workflow-state.md](references/workflow-state.md) when recovering an interrupted run or troubleshooting a blocked transition.
+Use `state status --latest`, `state finish`, and `state defer` to resume or release the active finding without creating parallel repair work.
 
 ### 7. Prepare and Submit the Change Request
 

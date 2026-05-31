@@ -10,6 +10,7 @@ ${REVIEW_FIX_SHIP_HOME:-${CODEX_HOME:-~/.codex}/review-fix-ship}/
 ```
 
 The fingerprint derives from the Git common directory so linked worktrees share a run.
+New runs use schema v2. Pre-release schema versions are rejected with a prompt to create a new run; no migration is attempted before real-user compatibility requirements exist.
 
 After an explicit `artifacts init preview` and `artifacts init run --confirm`, mirror readable reports and plans under:
 
@@ -31,6 +32,8 @@ scoped -> findings_ready -> active -> idle -> active
 Keep at most one active finding. Preserve available, deferred, and completed findings so the user can process the report serially.
 Use one workspace record per activated finding.
 Each workspace stores a repair `startRef` separately from the later PR or MR `targetBranch`. A single `base...head` comparison maps to `startRef=head` and `targetBranch=base`.
+
+Use `state activate` to choose one finding, `state defer` to release unfinished work, and `state finish --outcome <committed|pushed|submitted>` to release locally completed work. Successful PR or MR submission completes the active finding automatically.
 
 ## Workspace State
 

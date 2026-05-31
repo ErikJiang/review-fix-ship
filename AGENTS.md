@@ -10,6 +10,7 @@ Maintain the reusable `review-fix-ship` Agent Skill for Codex and GitHub Copilot
 - Keep the primary workflow in `skills/review-fix-ship/SKILL.md`.
 - Put detailed, conditionally loaded guidance in `skills/review-fix-ship/references/`.
 - Keep deterministic automation dependency-free in `skills/review-fix-ship/scripts/reviewctl.mjs`.
+- Keep user-facing usage and roadmap documents under `docs/`, outside the publishable skill.
 
 ## Safety
 
@@ -28,4 +29,4 @@ node --check skills/review-fix-ship/scripts/reviewctl.test.mjs
 node --test skills/review-fix-ship/scripts/reviewctl.test.mjs
 ```
 
-Update the root README and the skill README when installation paths, supported hosts, or public commands change.
+Update the root README and `docs/usage.md` when installation paths, supported hosts, or public commands change.
