@@ -38,6 +38,7 @@ workspace_ready -> plan_ready -> plan_approved -> implementing
 - `workspace create`, `commit run`, `push run`, and `submit run` require `--confirm`.
 - `commit run` requires `commit_pending`.
 - `push run` requires `push_pending`.
+- `push preview` and `push run` require `HEAD` to equal the commit recorded by `commit run`; repeat self-review and commit approval after any branch change.
 - `submit run` requires `submit_pending`.
 - Repository file edits are allowed only after `plan_approved`.
 - A branch-only workspace must be checked out manually before implementation or Git mutations.

@@ -278,6 +278,70 @@ test("workspace creation refuses dirty repositories unless explicitly acknowledg
   ], /uncommitted changes/);
 });
 
+test("push refuses commits added after the reviewed commit", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review-fix-ship-push-head-"));
+  t.after(() => cleanup(root));
+  const repo = createRepo(root);
+  const stateHome = join(root, "state");
+  const findings = join(root, "findings.json");
+  const selfReview = join(root, "self-review.md");
+  writeJson(findings, [finding()]);
+  writeFileSync(selfReview, "# Self-review\n\nNo remaining issues.\n", "utf8");
+
+  reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--scope", "main"]);
+  reviewctlJson(["state", "record-findings", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--file", findings]);
+  reviewctlJson(["state", "select", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--id", "RF-001"]);
+  const workspace = reviewctlJson([
+    "workspace", "create",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "push-head",
+    "--finding-id", "RF-001",
+    "--mode", "branch",
+    "--confirm",
+  ]);
+  git(["-C", repo, "checkout", workspace.workspace.branch]);
+  reviewctlJson([
+    "plan", "render",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "push-head",
+    "--finding-id", "RF-001",
+    "--title", "Handle missing cache entries",
+    "--finding", "Absent entries are dereferenced.",
+    "--step", "Add a guarded fallback.",
+    "--test", "Run the focused regression test.",
+  ]);
+  reviewctlJson(["state", "mark", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--finding-id", "RF-001", "--to", "plan_approved"]);
+  reviewctlJson(["state", "mark", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--finding-id", "RF-001", "--to", "implementing"]);
+  reviewctlJson(["state", "mark", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--finding-id", "RF-001", "--to", "self_reviewed", "--self-review-file", selfReview]);
+  writeFileSync(join(repo, "src", "example.txt"), "initial\nfallback\n", "utf8");
+  git(["-C", repo, "add", "src/example.txt"]);
+  reviewctlJson(["commit", "preview", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--finding-id", "RF-001", "--message", "fix(cache): handle absent entries"]);
+  reviewctlJson(["state", "mark", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--finding-id", "RF-001", "--to", "commit_pending"]);
+  reviewctlJson(["commit", "run", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--finding-id", "RF-001", "--message", "fix(cache): handle absent entries", "--confirm"]);
+  writeFileSync(join(repo, "src", "example.txt"), "initial\nfallback\ndebug\n", "utf8");
+  git(["-C", repo, "add", "src/example.txt"]);
+  git(["-C", repo, "commit", "-m", "debug after review"]);
+
+  reviewctlFails([
+    "push", "preview",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "push-head",
+    "--finding-id", "RF-001",
+  ], /Workspace HEAD changed after the reviewed commit/);
+  reviewctlJson(["state", "mark", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--finding-id", "RF-001", "--to", "push_pending"]);
+  reviewctlFails([
+    "push", "run",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "push-head",
+    "--finding-id", "RF-001",
+    "--confirm",
+  ], /Workspace HEAD changed after the reviewed commit/);
+});
+
 test("full lifecycle enforces approval gates and renders external artifacts", (t) => {
   const root = mkdtempSync(join(tmpdir(), "review-fix-ship-lifecycle-"));
   t.after(() => cleanup(root));
