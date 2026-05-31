@@ -149,12 +149,13 @@ function run(command, args, { cwd = undefined, allowFailure = false } = {}) {
   const useCommandShim = process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command);
   const executable = useCommandShim ? (process.env.ComSpec || "cmd.exe") : command;
   const executableArgs = useCommandShim
-    ? ["/d", "/s", "/c", [command, ...args].map(windowsCommandQuote).join(" ")]
+    ? ["/d", "/s", "/c", `"${[command, ...args].map(windowsCommandQuote).join(" ")}"`]
     : args;
   const result = spawnSync(executable, executableArgs, {
     cwd,
     encoding: "utf8",
     windowsHide: true,
+    windowsVerbatimArguments: useCommandShim,
   });
 
   if (result.error && !allowFailure) {
