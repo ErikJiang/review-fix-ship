@@ -132,14 +132,15 @@ high-value findings, and ask me which findings to handle.
 
    ```bash
    node "$reviewctl" workspace preview --repo <repo> --run-id <run-id> --finding-id RF-001 --mode worktree [--start-ref <ref> --target-branch <branch>]
-   node "$reviewctl" workspace create  --repo <repo> --run-id <run-id> --finding-id RF-001 --mode worktree [--start-ref <ref> --target-branch <branch>] --confirm
+   node "$reviewctl" workspace create  --repo <repo> --run-id <run-id> --finding-id RF-001 --mode worktree [--start-ref <ref> --target-branch <branch>] --preview-token <token> --confirm
    ```
 
    单个 `base...head` comparison 会从 `head` 创建修复 workspace，并将后续 PR/MR 目标设为 `base`。混合 diff scope 或尚未读取元数据的远端 review scope 必须显式提供 `--start-ref` 与 `--target-branch`。
+   每个 preview 都会返回一次性 `previewToken`。对应 create 或 run 必须传入该 token；缺失、过期、重复使用或参数漂移都会被拒绝。
 
 5. **计划批准**：代理生成外部行动计划。用户明确批准后，状态才能进入 `plan_approved`，随后才允许编码。
 6. **编码与自检**：完成代码变更、项目原生测试和 diff 自我 review，记录 `self-reviews/RF-001.md`。
-7. **受控交付**：依次预览并单独确认 commit、push、PR/MR 创建。任何一步都不会自动跳过用户确认。
+7. **受控交付**：依次预览并单独确认 commit、push、PR/MR 创建。执行命令必须携带匹配 preview 返回的一次性 token。任何一步都不会自动跳过用户确认。
 
 ## Token 优化工具
 

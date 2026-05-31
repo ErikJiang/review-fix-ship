@@ -37,6 +37,7 @@ workspace_ready -> plan_ready -> plan_approved -> implementing
 ## Mutation Guards
 
 - `workspace create`, `commit run`, `push run`, and `submit run` require `--confirm`.
+- Each mutating create or run also requires the matching preview's one-time `--preview-token`; reject missing, changed, stale, or replayed approvals.
 - `commit run` requires `commit_pending`.
 - `push run` requires `push_pending`.
 - `submit run` requires `submit_pending`.
