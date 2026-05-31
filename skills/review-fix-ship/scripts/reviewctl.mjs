@@ -351,6 +351,44 @@ function saveWorkspace(workspaceContext) {
   writeJson(workspaceContext.file, workspaceContext.data);
 }
 
+function previewFile(runContext, findingId, action) {
+  return join(runContext.dir, "previews", `${findingId}-${action}.json`);
+}
+
+function recordPreview(runContext, findingId, action, spec) {
+  const token = randomBytes(16).toString("hex");
+  writeJson(previewFile(runContext, findingId, action), {
+    schemaVersion: 1,
+    findingId,
+    action,
+    token,
+    spec,
+    createdAt: new Date().toISOString(),
+  });
+  return token;
+}
+
+function verifyPreview(runContext, findingId, action, spec, options) {
+  const token = required(options, "preview-token");
+  const file = previewFile(runContext, findingId, action);
+  if (!existsSync(file)) die(`${action} requires a matching preview`);
+  const preview = readJson(file);
+  if (preview.consumedAt) die(`${action} preview token has already been consumed`);
+  if (preview.token !== token) die(`${action} preview token does not match the latest preview`);
+  if (JSON.stringify(preview.spec) !== JSON.stringify(spec)) {
+    die(`${action} parameters changed after preview`, {
+      approved: preview.spec,
+      actual: spec,
+    });
+  }
+  return { file, data: preview };
+}
+
+function consumePreview(previewContext) {
+  previewContext.data.consumedAt = new Date().toISOString();
+  writeJson(previewContext.file, previewContext.data);
+}
+
 function nextRunId() {
   const timestamp = new Date().toISOString().replaceAll(/[-:.]/g, "").slice(0, 15);
   return `${timestamp}-${randomBytes(3).toString("hex")}`;
@@ -439,6 +477,18 @@ function commitishExists(repo, value) {
   }).ok;
 }
 
+function normalizePathScope(repo, input) {
+  const candidate = resolve(repo.root, input);
+  const relativePath = relative(repo.root, candidate);
+  const insideRepo = relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+  if (!insideRepo || !existsSync(candidate)) return null;
+
+  return {
+    type: statSync(candidate).isDirectory() ? "directory" : "file",
+    path: relativePath === "" ? "." : relativePath.replaceAll("\\", "/"),
+  };
+}
+
 function normalizeScope(repo, input) {
   const remote = parseRemoteReviewUrl(input);
   if (remote) {
@@ -450,6 +500,19 @@ function normalizeScope(repo, input) {
     die(`Unsupported remote review URL: ${input}`);
   }
 
+  if (input.startsWith("ref:")) {
+    const ref = input.slice("ref:".length);
+    if (!ref || !commitishExists(repo.root, ref)) die(`Invalid revision scope: ${input}`);
+    return { type: "revision", ref };
+  }
+
+  if (input.startsWith("path:")) {
+    const path = input.slice("path:".length);
+    const scope = path ? normalizePathScope(repo, path) : null;
+    if (!scope) die(`Unsupported or missing path scope: ${input}`);
+    return scope;
+  }
+
   const comparison = input.match(/^(.+)\.\.\.(.+)$/);
   if (comparison) {
     const [, base, head] = comparison;
@@ -459,19 +522,11 @@ function normalizeScope(repo, input) {
     return { type: "comparison", base, head };
   }
 
-  const candidate = resolve(repo.root, input);
-  const relativePath = relative(repo.root, candidate);
-  const insideRepo = relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
-  if (insideRepo && existsSync(candidate)) {
-    return {
-      type: statSync(candidate).isDirectory() ? "directory" : "file",
-      path: relativePath === "" ? "." : relativePath.replaceAll("\\", "/"),
-    };
-  }
-
-  if (commitishExists(repo.root, input)) {
-    return { type: "revision", ref: input };
-  }
+  const pathScope = normalizePathScope(repo, input);
+  const isRevision = commitishExists(repo.root, input);
+  if (pathScope && isRevision) die(`Ambiguous scope: ${input}; use ref:${input} or path:${input}`);
+  if (pathScope) return pathScope;
+  if (isRevision) return { type: "revision", ref: input };
 
   die(`Unsupported or missing scope: ${input}`);
 }
@@ -558,6 +613,41 @@ function ensureWorkspaceCheckedOut(repo, workspace) {
     });
   }
   return workDir;
+}
+
+function repositoryFile(workDir, input) {
+  const file = relative(workDir, resolve(workDir, input));
+  const insideRepo = file !== "" && !file.startsWith("..") && !isAbsolute(file);
+  if (!insideRepo) die(`Commit file must be inside the workspace: ${input}`);
+  return file.replaceAll("\\", "/");
+}
+
+function uniqueSorted(items) {
+  return [...new Set(items)].sort();
+}
+
+function stagedFiles(workDir) {
+  return uniqueSorted(
+    runGit(workDir, ["diff", "--cached", "--name-only", "-z"]).stdout
+      .split("\0")
+      .filter(Boolean),
+  );
+}
+
+function fileSetDifference(left, right) {
+  const rightSet = new Set(right);
+  return left.filter((item) => !rightSet.has(item));
+}
+
+function ensureCommittedHead(workDir, workspace) {
+  const currentHead = runGit(workDir, ["rev-parse", "HEAD"]).stdout;
+  if (!workspace.commit || currentHead !== workspace.commit) {
+    die("Workspace HEAD changed after the reviewed commit", {
+      reviewedCommit: workspace.commit || null,
+      currentHead,
+      hint: "Repeat self-review and commit approval before pushing the updated branch.",
+    });
+  }
 }
 
 function listText(items, fallback = "- None specified") {
@@ -763,6 +853,35 @@ function handleStateMark(options) {
   printJson({ findingId, phase: target });
 }
 
+function workspaceRefs(repo, runContext, options) {
+  const explicitStartRef = optional(options, "start-ref");
+  const explicitTargetBranch = optional(options, "target-branch");
+  if ((explicitStartRef && !explicitTargetBranch) || (!explicitStartRef && explicitTargetBranch)) {
+    die("--start-ref and --target-branch must be used together");
+  }
+  if (explicitStartRef && explicitTargetBranch) {
+    if (!commitishExists(repo.root, explicitStartRef)) die(`Invalid workspace start ref: ${explicitStartRef}`);
+    return { startRef: explicitStartRef, targetBranch: explicitTargetBranch };
+  }
+
+  const diffScopes = runContext.data.scopes.filter((scope) => !["directory", "file"].includes(scope.type));
+  if (diffScopes.length === 0) {
+    if (!repo.branch) die("Cannot derive workspace refs from a detached HEAD; provide --start-ref and --target-branch");
+    return { startRef: repo.branch, targetBranch: repo.branch };
+  }
+  if (diffScopes.length > 1) {
+    die("Cannot derive workspace refs from multiple diff scopes; provide --start-ref and --target-branch");
+  }
+
+  const [scope] = diffScopes;
+  if (scope.type === "comparison") return { startRef: scope.head, targetBranch: scope.base };
+  if (scope.type === "revision") {
+    if (!repo.branch) die("Cannot derive target branch from a detached HEAD; provide --start-ref and --target-branch");
+    return { startRef: scope.ref, targetBranch: repo.branch };
+  }
+  die("Cannot derive workspace refs from a remote review scope; provide --start-ref and --target-branch");
+}
+
 function workspaceSpec(repo, runContext, options) {
   requireRunPhase(runContext, "selected");
   const findingId = required(options, "finding-id");
@@ -772,23 +891,25 @@ function workspaceSpec(repo, runContext, options) {
   if (!["branch", "worktree"].includes(mode)) die("--mode must be branch or worktree");
   const slug = slugify(optional(options, "slug", finding.title));
   const branch = `review/${runContext.data.id}/${findingId.toLowerCase()}-${slug}`;
-  const base = optional(options, "base", repo.branch || "HEAD");
+  const { startRef, targetBranch } = workspaceRefs(repo, runContext, options);
   const worktreePath = resolve(
     optional(options, "path", join(dirname(repo.root), `${basename(repo.root)}-${findingId.toLowerCase()}`)),
   );
   const args = mode === "worktree"
-    ? ["worktree", "add", "-b", branch, worktreePath, base]
-    : ["branch", branch, base];
+    ? ["worktree", "add", "-b", branch, worktreePath, startRef]
+    : ["branch", branch, startRef];
 
-  return { findingId, finding, mode, branch, base, path: mode === "worktree" ? worktreePath : repo.root, args };
+  return { findingId, finding, mode, branch, startRef, targetBranch, path: mode === "worktree" ? worktreePath : repo.root, args };
 }
 
 function handleWorkspacePreview(options) {
   const repo = repositoryInfo(required(options, "repo"));
   const runContext = loadRun(repo, options, required(options, "run-id"));
   const spec = workspaceSpec(repo, runContext, options);
+  const previewToken = recordPreview(runContext, spec.findingId, "workspace create", spec);
   printJson({
     action: "workspace create",
+    previewToken,
     repositoryDirty: repo.dirty,
     dirtyFiles: repo.dirtyFiles,
     command: formatCommand("git", ["-C", repo.root, ...spec.args]),
@@ -807,6 +928,7 @@ function handleWorkspaceCreate(options) {
   }
   const runContext = loadRun(repo, options, required(options, "run-id"));
   const spec = workspaceSpec(repo, runContext, options);
+  const previewContext = verifyPreview(runContext, spec.findingId, "workspace create", spec, options);
   if (existsSync(workspaceFile(runContext, spec.findingId))) {
     die(`Workspace already recorded for finding: ${spec.findingId}`);
   }
@@ -828,7 +950,8 @@ function handleWorkspaceCreate(options) {
       findingId: spec.findingId,
       mode: spec.mode,
       branch: spec.branch,
-      base: spec.base,
+      startRef: spec.startRef,
+      targetBranch: spec.targetBranch,
       path: spec.path,
       phase: "workspace_ready",
       createdAt: now,
@@ -836,6 +959,7 @@ function handleWorkspaceCreate(options) {
     },
   };
   saveWorkspace(workspaceContext);
+  consumePreview(previewContext);
   printJson({ findingId: spec.findingId, phase: "workspace_ready", workspace: workspaceContext.data });
 }
 
@@ -906,12 +1030,17 @@ function handleCommitPreview(options) {
   requireWorkspacePhase(workspaceContext, ["self_reviewed", "commit_pending"]);
   const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
   const message = required(options, "message");
+  const approvedFiles = uniqueSorted(values(options, "file").map((file) => repositoryFile(workDir, String(file))));
+  if (approvedFiles.length === 0) die("Provide at least one --file for the intended commit");
+  const previewToken = recordPreview(runContext, findingId, "commit run", { message, approvedFiles });
   printJson({
     action: "commit",
     findingId,
+    previewToken,
     command: formatCommand("git", ["-C", workDir, "commit", "-m", message]),
     changes: runGit(workDir, ["status", "--porcelain"]).stdout.split(/\r?\n/).filter(Boolean),
-    stagedFiles: runGit(workDir, ["diff", "--cached", "--name-only"]).stdout.split(/\r?\n/).filter(Boolean),
+    approvedFiles,
+    stagedFiles: stagedFiles(workDir),
   });
 }
 
@@ -924,14 +1053,28 @@ function handleCommitRun(options) {
   requireWorkspacePhase(workspaceContext, "commit_pending");
   const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
   const message = required(options, "message");
+  const approvedFiles = uniqueSorted(values(options, "file").map((file) => repositoryFile(workDir, String(file))));
+  if (approvedFiles.length === 0) die("Provide at least one --file matching the approved commit preview");
+  const previewContext = verifyPreview(runContext, findingId, "commit run", { message, approvedFiles }, options);
   const changes = runGit(workDir, ["status", "--porcelain"]).stdout;
   if (!changes) die("No changes to commit");
-  const stagedFiles = runGit(workDir, ["diff", "--cached", "--name-only"]).stdout;
-  if (!stagedFiles) die("No staged changes to commit; stage the intended files explicitly before committing");
+  const actualStagedFiles = stagedFiles(workDir);
+  if (actualStagedFiles.length === 0) die("No staged changes to commit; stage the intended files explicitly before committing");
+  const missingFiles = fileSetDifference(approvedFiles, actualStagedFiles);
+  const unexpectedFiles = fileSetDifference(actualStagedFiles, approvedFiles);
+  if (missingFiles.length || unexpectedFiles.length) {
+    die("Staged files do not match the approved commit files", {
+      approvedFiles,
+      stagedFiles: actualStagedFiles,
+      missingFiles,
+      unexpectedFiles,
+    });
+  }
   runGit(workDir, ["commit", "-m", message]);
   workspaceContext.data.phase = "committed";
   workspaceContext.data.commit = runGit(workDir, ["rev-parse", "HEAD"]).stdout;
   saveWorkspace(workspaceContext);
+  consumePreview(previewContext);
   printJson({ findingId, phase: "committed", commit: workspaceContext.data.commit });
 }
 
@@ -942,10 +1085,17 @@ function handlePushPreview(options) {
   const workspaceContext = loadWorkspace(runContext, findingId);
   requireWorkspacePhase(workspaceContext, ["committed", "push_pending"]);
   const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
+  ensureCommittedHead(workDir, workspaceContext.data);
   const remote = optional(options, "remote", "origin");
+  const previewToken = recordPreview(runContext, findingId, "push run", {
+    branch: workspaceContext.data.branch,
+    remote,
+    reviewedCommit: workspaceContext.data.commit,
+  });
   printJson({
     action: "push",
     findingId,
+    previewToken,
     command: formatCommand("git", ["-C", workDir, "push", "-u", remote, workspaceContext.data.branch]),
   });
 }
@@ -958,11 +1108,18 @@ function handlePushRun(options) {
   const workspaceContext = loadWorkspace(runContext, findingId);
   requireWorkspacePhase(workspaceContext, "push_pending");
   const workDir = ensureWorkspaceCheckedOut(repo, workspaceContext.data);
+  ensureCommittedHead(workDir, workspaceContext.data);
   const remote = optional(options, "remote", "origin");
+  const previewContext = verifyPreview(runContext, findingId, "push run", {
+    branch: workspaceContext.data.branch,
+    remote,
+    reviewedCommit: workspaceContext.data.commit,
+  }, options);
   runGit(workDir, ["push", "-u", remote, workspaceContext.data.branch]);
   workspaceContext.data.phase = "pushed";
   workspaceContext.data.remote = remote;
   saveWorkspace(workspaceContext);
+  consumePreview(previewContext);
   printJson({ findingId, phase: "pushed", remote });
 }
 
@@ -972,13 +1129,14 @@ function submitSpec(repo, workspace, options) {
   const title = required(options, "title");
   const bodyFile = resolve(required(options, "body-file"));
   if (!existsSync(bodyFile)) die(`Body file not found: ${bodyFile}`);
-  const base = optional(options, "base", workspace.base);
+  const base = optional(options, "base", workspace.targetBranch || workspace.base);
+  if (!base) die("Missing target branch; provide --base");
   const isDraft = flag(options, "draft");
 
   if (provider === "github") {
     const args = ["pr", "create", "--title", title, "--body-file", bodyFile, "--base", base];
     if (isDraft) args.push("--draft");
-    return { provider, command: "gh", args, bodyFile, base };
+    return { provider, command: "gh", args, bodyFile, bodyHash: shortHash(readFileSync(bodyFile, "utf8")), base };
   }
 
   const body = readFileSync(bodyFile, "utf8");
@@ -990,7 +1148,7 @@ function submitSpec(repo, workspace, options) {
     "--source-branch", workspace.branch,
   ];
   if (isDraft) args.push("--draft");
-  return { provider, command: "glab", args, bodyFile, base };
+  return { provider, command: "glab", args, bodyFile, bodyHash: shortHash(body), base };
 }
 
 function handleSubmitPreview(options) {
@@ -1000,9 +1158,11 @@ function handleSubmitPreview(options) {
   const workspaceContext = loadWorkspace(runContext, findingId);
   requireWorkspacePhase(workspaceContext, ["pushed", "submit_pending"]);
   const spec = submitSpec(repo, workspaceContext.data, options);
+  const previewToken = recordPreview(runContext, findingId, "submit run", spec);
   printJson({
     action: "submit",
     findingId,
+    previewToken,
     provider: spec.provider,
     adapterAvailable: commandExists(spec.command),
     command: formatCommand(spec.command, spec.args),
@@ -1017,6 +1177,7 @@ function handleSubmitRun(options) {
   const workspaceContext = loadWorkspace(runContext, findingId);
   requireWorkspacePhase(workspaceContext, "submit_pending");
   const spec = submitSpec(repo, workspaceContext.data, options);
+  const previewContext = verifyPreview(runContext, findingId, "submit run", spec, options);
   if (!commandExists(spec.command)) {
     die(`Missing provider CLI: ${spec.command}`, {
       hint: `Install and authenticate ${spec.command}, then re-run submit preview and submit run.`,
@@ -1027,6 +1188,7 @@ function handleSubmitRun(options) {
   workspaceContext.data.phase = "submitted";
   workspaceContext.data.submission = result.stdout;
   saveWorkspace(workspaceContext);
+  consumePreview(previewContext);
   printJson({ findingId, phase: "submitted", provider: spec.provider, output: result.stdout });
 }
 
@@ -1041,14 +1203,15 @@ Commands:
   state record-findings --repo <path> --run-id <id> --file <findings.json>
   state select --repo <path> --run-id <id> --id <finding-id> [--id <finding-id> ...]
   state mark --repo <path> --run-id <id> --finding-id <id> --to <phase>
-  workspace preview|create --repo <path> --run-id <id> --finding-id <id> --mode <branch|worktree>
+  workspace preview|create --repo <path> --run-id <id> --finding-id <id> --mode <branch|worktree> [--preview-token <token>]
   plan render --repo <path> --run-id <id> --finding-id <id> --title <text> --finding <text> --step <text> --test <text>
   draft render --repo <path> --run-id <id> --finding-id <id> --provider <github|gitlab> --title <text> --summary <text> --change <text> --testing <text>
-  commit preview|run --repo <path> --run-id <id> --finding-id <id> --message <text>
-  push preview|run --repo <path> --run-id <id> --finding-id <id>
-  submit preview|run --repo <path> --run-id <id> --finding-id <id> --provider <github|gitlab> --title <text> --body-file <file>
+  commit preview|run --repo <path> --run-id <id> --finding-id <id> --message <text> --file <path> [--file <path> ...] [--preview-token <token>]
+  push preview|run --repo <path> --run-id <id> --finding-id <id> [--preview-token <token>]
+  submit preview|run --repo <path> --run-id <id> --finding-id <id> --provider <github|gitlab> --title <text> --body-file <file> [--preview-token <token>]
 
 Mutating create/run commands require --confirm.
+Mutating create/run commands also require the one-time --preview-token returned by the matching preview.
 Use --state-home <path> to override external state storage.
 `);
 }

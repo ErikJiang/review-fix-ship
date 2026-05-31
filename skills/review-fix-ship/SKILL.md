@@ -59,6 +59,7 @@ Bind one run to one repository. Accept multiple scopes and merge them into one r
 - GitLab MR URLs, including self-hosted GitLab
 
 Use `scope normalize`; do not hand-edit run state. Reject remote URLs that conflict with the repository origin when an origin exists. Treat directory and file scopes as filters over each diff target.
+When a repository path and revision have the same name, reject the ambiguous input and ask for `ref:<value>` or `path:<value>`. Keep unprefixed values for unambiguous scopes.
 
 If a PR or MR URL requires a missing provider CLI, continue local analysis where possible and report the missing adapter. Read [providers.md](references/providers.md) only when remote input or submission is involved.
 
@@ -88,11 +89,13 @@ Handle each selected finding independently unless the user explicitly requests a
 Use:
 
 ```powershell
-node "$reviewctl" workspace preview --repo <repo> --run-id <run-id> --finding-id <id> --mode <branch|worktree> [--path <path>]
-node "$reviewctl" workspace create  --repo <repo> --run-id <run-id> --finding-id <id> --mode <branch|worktree> [--path <path>] --confirm
+node "$reviewctl" workspace preview --repo <repo> --run-id <run-id> --finding-id <id> --mode <branch|worktree> [--path <path>] [--start-ref <ref> --target-branch <branch>]
+node "$reviewctl" workspace create  --repo <repo> --run-id <run-id> --finding-id <id> --mode <branch|worktree> [--path <path>] [--start-ref <ref> --target-branch <branch>] --preview-token <token> --confirm
 ```
 
 Never force branch creation, reset state, delete worktrees, or clean user changes.
+For a single `base...head` comparison, create the repair workspace from `head` and target the later PR or MR at `base`. Require explicit `--start-ref` and `--target-branch` when the normalized scopes cannot determine both values safely.
+Each preview returns a one-time `previewToken`. Pass that token to the matching create or run command. Reject missing, stale, replayed, or parameter-mismatched tokens.
 
 ### 5. Write and Approve the Plan
 
@@ -128,16 +131,18 @@ node "$reviewctl" draft render --repo <repo> --run-id <run-id> --finding-id <id>
 
 Require separate user approval before each mutation:
 
-Stage only the intended files after implementation and self-review. Do not use an unscoped `git add .` when unrelated changes exist.
+Stage only the intended files after implementation and self-review. Do not use an unscoped `git add .` when unrelated changes exist. Pass the intended repository-relative files to `commit preview`; `commit run` rejects staged files that do not exactly match that approved allowlist.
 
 ```powershell
-node "$reviewctl" commit preview --repo <repo> --run-id <run-id> --finding-id <id> --message <message>
-node "$reviewctl" commit run     --repo <repo> --run-id <run-id> --finding-id <id> --message <message> --confirm
+node "$reviewctl" commit preview --repo <repo> --run-id <run-id> --finding-id <id> --message <message> --file <path> [--file <path> ...]
+node "$reviewctl" commit run     --repo <repo> --run-id <run-id> --finding-id <id> --message <message> --file <path> [--file <path> ...] --preview-token <token> --confirm
 node "$reviewctl" push preview   --repo <repo> --run-id <run-id> --finding-id <id>
-node "$reviewctl" push run       --repo <repo> --run-id <run-id> --finding-id <id> --confirm
+node "$reviewctl" push run       --repo <repo> --run-id <run-id> --finding-id <id> --preview-token <token> --confirm
 node "$reviewctl" submit preview --repo <repo> --run-id <run-id> --finding-id <id> --provider <github|gitlab> --title <title> --body-file <file>
-node "$reviewctl" submit run     --repo <repo> --run-id <run-id> --finding-id <id> --provider <github|gitlab> --title <title> --body-file <file> --confirm
+node "$reviewctl" submit run     --repo <repo> --run-id <run-id> --finding-id <id> --provider <github|gitlab> --title <title> --body-file <file> --preview-token <token> --confirm
 ```
+
+Before previewing or running a push, require the checked-out `HEAD` to equal the commit recorded by `commit run`. If the branch changed, repeat self-review and commit approval before pushing.
 
 Never call `gh pr create --dry-run`; it may still push. Never pass `--fill`, `--push`, or `--yes` to `glab mr create`. If `gh` or `glab` is missing, return the generated draft and explain the installation or authentication requirement. Do not install CLIs automatically.
 

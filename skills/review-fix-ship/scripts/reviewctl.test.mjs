@@ -211,6 +211,32 @@ test("scope normalization deduplicates local scopes and accepts GitHub and self-
     "--run-id", "mismatch-run",
     "--scope", "https://github.com/other/project/pull/8",
   ], /does not match repository origin/);
+
+  const ambiguousRepo = createRepo(root, "ambiguous");
+  git(["-C", ambiguousRepo, "branch", "src"]);
+  reviewctlFails([
+    "scope", "normalize",
+    "--repo", ambiguousRepo,
+    "--state-home", stateHome,
+    "--run-id", "ambiguous-run",
+    "--scope", "src",
+  ], /Ambiguous scope: src; use ref:src or path:src/);
+  const explicitRef = reviewctlJson([
+    "scope", "normalize",
+    "--repo", ambiguousRepo,
+    "--state-home", stateHome,
+    "--run-id", "explicit-ref-run",
+    "--scope", "ref:src",
+  ]);
+  assert.deepEqual(explicitRef.scopes, [{ type: "revision", ref: "src" }]);
+  const explicitPath = reviewctlJson([
+    "scope", "normalize",
+    "--repo", ambiguousRepo,
+    "--state-home", stateHome,
+    "--run-id", "explicit-path-run",
+    "--scope", "path:src",
+  ]);
+  assert.deepEqual(explicitPath.scopes, [{ type: "directory", path: "src" }]);
 });
 
 test("finding recording rejects padding and low-confidence candidates", (t) => {
@@ -254,6 +280,62 @@ test("finding recording rejects padding and low-confidence candidates", (t) => {
   ], /confidence must be between 80 and 100/);
 });
 
+test("workspace preview separates comparison start ref from change request target branch", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review-fix-ship-workspace-refs-"));
+  t.after(() => cleanup(root));
+  const repo = createRepo(root);
+  const stateHome = join(root, "state");
+  const findings = join(root, "findings.json");
+  writeJson(findings, [finding()]);
+  git(["-C", repo, "checkout", "-b", "feature"]);
+  writeFileSync(join(repo, "src", "example.txt"), "feature\n", "utf8");
+  git(["-C", repo, "add", "src/example.txt"]);
+  git(["-C", repo, "commit", "-m", "feature"]);
+  git(["-C", repo, "checkout", "main"]);
+
+  reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "comparison", "--scope", "main...feature"]);
+  reviewctlJson(["state", "record-findings", "--repo", repo, "--state-home", stateHome, "--run-id", "comparison", "--file", findings]);
+  reviewctlJson(["state", "select", "--repo", repo, "--state-home", stateHome, "--run-id", "comparison", "--id", "RF-001"]);
+  const preview = reviewctlJson([
+    "workspace", "preview",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "comparison",
+    "--finding-id", "RF-001",
+    "--mode", "worktree",
+    "--path", join(root, "comparison-worktree"),
+  ]);
+  assert.equal(preview.workspace.startRef, "feature");
+  assert.equal(preview.workspace.targetBranch, "main");
+  assert.match(preview.command, / feature$/);
+
+  const remoteRepo = createRepo(root, "remote-review");
+  git(["-C", remoteRepo, "remote", "add", "origin", "https://github.com/acme/project.git"]);
+  reviewctlJson(["scope", "normalize", "--repo", remoteRepo, "--state-home", stateHome, "--run-id", "remote-review", "--scope", "https://github.com/acme/project/pull/7"]);
+  reviewctlJson(["state", "record-findings", "--repo", remoteRepo, "--state-home", stateHome, "--run-id", "remote-review", "--file", findings]);
+  reviewctlJson(["state", "select", "--repo", remoteRepo, "--state-home", stateHome, "--run-id", "remote-review", "--id", "RF-001"]);
+  reviewctlFails([
+    "workspace", "preview",
+    "--repo", remoteRepo,
+    "--state-home", stateHome,
+    "--run-id", "remote-review",
+    "--finding-id", "RF-001",
+    "--mode", "branch",
+  ], /provide --start-ref and --target-branch/);
+  const explicit = reviewctlJson([
+    "workspace", "preview",
+    "--repo", remoteRepo,
+    "--state-home", stateHome,
+    "--run-id", "remote-review",
+    "--finding-id", "RF-001",
+    "--mode", "branch",
+    "--start-ref", "main",
+    "--target-branch", "main",
+  ]);
+  assert.equal(explicit.workspace.startRef, "main");
+  assert.equal(explicit.workspace.targetBranch, "main");
+});
+
 test("workspace creation refuses dirty repositories unless explicitly acknowledged", (t) => {
   const root = mkdtempSync(join(tmpdir(), "review-fix-ship-dirty-"));
   t.after(() => cleanup(root));
@@ -278,6 +360,155 @@ test("workspace creation refuses dirty repositories unless explicitly acknowledg
   ], /uncommitted changes/);
 });
 
+test("workspace creation requires a matching one-time preview token", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review-fix-ship-preview-token-"));
+  t.after(() => cleanup(root));
+  const repo = createRepo(root);
+  const stateHome = join(root, "state");
+  const findings = join(root, "findings.json");
+  const approvedPath = join(root, "approved-worktree");
+  const changedPath = join(root, "changed-worktree");
+  writeJson(findings, [finding()]);
+
+  reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "preview-token", "--scope", "main"]);
+  reviewctlJson(["state", "record-findings", "--repo", repo, "--state-home", stateHome, "--run-id", "preview-token", "--file", findings]);
+  reviewctlJson(["state", "select", "--repo", repo, "--state-home", stateHome, "--run-id", "preview-token", "--id", "RF-001"]);
+  reviewctlFails([
+    "workspace", "create",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "preview-token",
+    "--finding-id", "RF-001",
+    "--mode", "worktree",
+    "--path", approvedPath,
+    "--confirm",
+  ], /preview-token/);
+  const preview = reviewctlJson([
+    "workspace", "preview",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "preview-token",
+    "--finding-id", "RF-001",
+    "--mode", "worktree",
+    "--path", approvedPath,
+  ]);
+  reviewctlFails([
+    "workspace", "create",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "preview-token",
+    "--finding-id", "RF-001",
+    "--mode", "worktree",
+    "--path", changedPath,
+    "--preview-token", preview.previewToken,
+    "--confirm",
+  ], /parameters changed after preview/);
+  const matchingPreview = reviewctlJson([
+    "workspace", "preview",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "preview-token",
+    "--finding-id", "RF-001",
+    "--mode", "worktree",
+    "--path", approvedPath,
+  ]);
+  reviewctlJson([
+    "workspace", "create",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "preview-token",
+    "--finding-id", "RF-001",
+    "--mode", "worktree",
+    "--path", approvedPath,
+    "--preview-token", matchingPreview.previewToken,
+    "--confirm",
+  ]);
+  reviewctlFails([
+    "workspace", "create",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "preview-token",
+    "--finding-id", "RF-001",
+    "--mode", "worktree",
+    "--path", approvedPath,
+    "--preview-token", matchingPreview.previewToken,
+    "--confirm",
+  ], /already been consumed/);
+});
+
+test("push refuses commits added after the reviewed commit", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review-fix-ship-push-head-"));
+  t.after(() => cleanup(root));
+  const repo = createRepo(root);
+  const stateHome = join(root, "state");
+  const findings = join(root, "findings.json");
+  const selfReview = join(root, "self-review.md");
+  writeJson(findings, [finding()]);
+  writeFileSync(selfReview, "# Self-review\n\nNo remaining issues.\n", "utf8");
+
+  reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--scope", "main"]);
+  reviewctlJson(["state", "record-findings", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--file", findings]);
+  reviewctlJson(["state", "select", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--id", "RF-001"]);
+  const workspacePreview = reviewctlJson([
+    "workspace", "preview",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "push-head",
+    "--finding-id", "RF-001",
+    "--mode", "branch",
+  ]);
+  const workspace = reviewctlJson([
+    "workspace", "create",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "push-head",
+    "--finding-id", "RF-001",
+    "--mode", "branch",
+    "--preview-token", workspacePreview.previewToken,
+    "--confirm",
+  ]);
+  git(["-C", repo, "checkout", workspace.workspace.branch]);
+  reviewctlJson([
+    "plan", "render",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "push-head",
+    "--finding-id", "RF-001",
+    "--title", "Handle missing cache entries",
+    "--finding", "Absent entries are dereferenced.",
+    "--step", "Add a guarded fallback.",
+    "--test", "Run the focused regression test.",
+  ]);
+  reviewctlJson(["state", "mark", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--finding-id", "RF-001", "--to", "plan_approved"]);
+  reviewctlJson(["state", "mark", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--finding-id", "RF-001", "--to", "implementing"]);
+  reviewctlJson(["state", "mark", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--finding-id", "RF-001", "--to", "self_reviewed", "--self-review-file", selfReview]);
+  writeFileSync(join(repo, "src", "example.txt"), "initial\nfallback\n", "utf8");
+  git(["-C", repo, "add", "src/example.txt"]);
+  const commitPreview = reviewctlJson(["commit", "preview", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--finding-id", "RF-001", "--message", "fix(cache): handle absent entries", "--file", "src/example.txt"]);
+  reviewctlJson(["state", "mark", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--finding-id", "RF-001", "--to", "commit_pending"]);
+  reviewctlJson(["commit", "run", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--finding-id", "RF-001", "--message", "fix(cache): handle absent entries", "--file", "src/example.txt", "--preview-token", commitPreview.previewToken, "--confirm"]);
+  writeFileSync(join(repo, "src", "example.txt"), "initial\nfallback\ndebug\n", "utf8");
+  git(["-C", repo, "add", "src/example.txt"]);
+  git(["-C", repo, "commit", "-m", "debug after review"]);
+
+  reviewctlFails([
+    "push", "preview",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "push-head",
+    "--finding-id", "RF-001",
+  ], /Workspace HEAD changed after the reviewed commit/);
+  reviewctlJson(["state", "mark", "--repo", repo, "--state-home", stateHome, "--run-id", "push-head", "--finding-id", "RF-001", "--to", "push_pending"]);
+  reviewctlFails([
+    "push", "run",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "push-head",
+    "--finding-id", "RF-001",
+    "--confirm",
+  ], /Workspace HEAD changed after the reviewed commit/);
+});
+
 test("full lifecycle enforces approval gates and renders external artifacts", (t) => {
   const root = mkdtempSync(join(tmpdir(), "review-fix-ship-lifecycle-"));
   t.after(() => cleanup(root));
@@ -289,11 +520,25 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
   const findings = join(root, "findings.json");
   const worktree = join(root, "worktree");
   writeJson(findings, [finding()]);
+  writeFileSync(join(repo, "src", "delete.txt"), "delete\n", "utf8");
+  writeFileSync(join(repo, "src", "rename.txt"), "rename\n", "utf8");
+  writeFileSync(join(repo, "src", "file with space.txt"), "initial\n", "utf8");
+  git(["-C", repo, "add", "src/delete.txt", "src/rename.txt", "src/file with space.txt"]);
+  git(["-C", repo, "commit", "-m", "add commit allowlist fixtures"]);
 
   reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--scope", "main"]);
   reviewctlJson(["state", "record-findings", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--file", findings]);
   reviewctlJson(["state", "select", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--id", "RF-001"]);
 
+  const workspacePreview = reviewctlJson([
+    "workspace", "preview",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "lifecycle",
+    "--finding-id", "RF-001",
+    "--mode", "worktree",
+    "--path", worktree,
+  ]);
   reviewctlFails([
     "workspace", "create",
     "--repo", repo,
@@ -302,6 +547,7 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
     "--finding-id", "RF-001",
     "--mode", "worktree",
     "--path", worktree,
+    "--preview-token", workspacePreview.previewToken,
   ], /requires explicit --confirm/);
 
   reviewctlJson([
@@ -312,6 +558,7 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
     "--finding-id", "RF-001",
     "--mode", "worktree",
     "--path", worktree,
+    "--preview-token", workspacePreview.previewToken,
     "--confirm",
   ]);
 
@@ -373,14 +620,22 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
   assert.match(readFileSync(draft.bodyFile, "utf8"), /## Summary/);
 
   writeFileSync(join(worktree, "src", "example.txt"), "initial\nfallback\n", "utf8");
+  rmSync(join(worktree, "src", "delete.txt"));
+  git(["-C", worktree, "mv", "src/rename.txt", "src/renamed.txt"]);
+  writeFileSync(join(worktree, "src", "file with space.txt"), "changed\n", "utf8");
+  git(["-C", worktree, "add", "-u"]);
   git(["-C", worktree, "add", "src/example.txt"]);
-  reviewctlJson([
+  const commitPreview = reviewctlJson([
     "commit", "preview",
     "--repo", repo,
     "--state-home", stateHome,
     "--run-id", "lifecycle",
     "--finding-id", "RF-001",
     "--message", "fix(cache): handle absent entries",
+    "--file", "src/delete.txt",
+    "--file", "src/example.txt",
+    "--file", "src/file with space.txt",
+    "--file", "src/renamed.txt",
   ]);
   reviewctlJson(["state", "mark", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--finding-id", "RF-001", "--to", "commit_pending"]);
   reviewctlFails([
@@ -391,6 +646,39 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
     "--finding-id", "RF-001",
     "--message", "fix(cache): handle absent entries",
   ], /requires explicit --confirm/);
+  const unrelated = join(worktree, "src", "unrelated file.txt");
+  writeFileSync(unrelated, "unrelated\n", "utf8");
+  git(["-C", worktree, "add", "src/unrelated file.txt"]);
+  reviewctlFails([
+    "commit", "run",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "lifecycle",
+    "--finding-id", "RF-001",
+    "--message", "fix(cache): changed after preview",
+    "--file", "src/delete.txt",
+    "--file", "src/example.txt",
+    "--file", "src/file with space.txt",
+    "--file", "src/renamed.txt",
+    "--preview-token", commitPreview.previewToken,
+    "--confirm",
+  ], /parameters changed after preview/);
+  reviewctlFails([
+    "commit", "run",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "lifecycle",
+    "--finding-id", "RF-001",
+    "--message", "fix(cache): handle absent entries",
+    "--file", "src/delete.txt",
+    "--file", "src/example.txt",
+    "--file", "src/file with space.txt",
+    "--file", "src/renamed.txt",
+    "--preview-token", commitPreview.previewToken,
+    "--confirm",
+  ], /Staged files do not match the approved commit files/);
+  git(["-C", worktree, "restore", "--staged", "src/unrelated file.txt"]);
+  rmSync(unrelated);
   reviewctlJson([
     "commit", "run",
     "--repo", repo,
@@ -398,10 +686,15 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
     "--run-id", "lifecycle",
     "--finding-id", "RF-001",
     "--message", "fix(cache): handle absent entries",
+    "--file", "src/delete.txt",
+    "--file", "src/example.txt",
+    "--file", "src/file with space.txt",
+    "--file", "src/renamed.txt",
+    "--preview-token", commitPreview.previewToken,
     "--confirm",
   ]);
 
-  reviewctlJson(["push", "preview", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--finding-id", "RF-001"]);
+  const pushPreview = reviewctlJson(["push", "preview", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--finding-id", "RF-001"]);
   reviewctlJson(["state", "mark", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--finding-id", "RF-001", "--to", "push_pending"]);
   reviewctlFails([
     "push", "run",
@@ -410,7 +703,17 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
     "--run-id", "lifecycle",
     "--finding-id", "RF-001",
   ], /requires explicit --confirm/);
-  reviewctlJson(["push", "run", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--finding-id", "RF-001", "--confirm"]);
+  reviewctlFails([
+    "push", "run",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "lifecycle",
+    "--finding-id", "RF-001",
+    "--remote", "changed-after-preview",
+    "--preview-token", pushPreview.previewToken,
+    "--confirm",
+  ], /parameters changed after preview/);
+  reviewctlJson(["push", "run", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--finding-id", "RF-001", "--preview-token", pushPreview.previewToken, "--confirm"]);
   reviewctlJson(["state", "mark", "--repo", repo, "--state-home", stateHome, "--run-id", "lifecycle", "--finding-id", "RF-001", "--to", "submit_pending"]);
 
   const submission = reviewctlJson([
@@ -424,8 +727,61 @@ test("full lifecycle enforces approval gates and renders external artifacts", (t
     "--body-file", draft.bodyFile,
   ]);
   assert.match(submission.command, /^gh pr create /);
+  assert.match(submission.command, / --base main$/);
   assert.doesNotMatch(submission.command, /--dry-run/);
   assert.equal(typeof submission.adapterAvailable, "boolean");
+  reviewctlFails([
+    "submit", "run",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "lifecycle",
+    "--finding-id", "RF-001",
+    "--provider", "github",
+    "--title", "fix(cache): changed after preview",
+    "--body-file", draft.bodyFile,
+    "--preview-token", submission.previewToken,
+    "--confirm",
+  ], /parameters changed after preview/);
+  reviewctlFails([
+    "submit", "run",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "lifecycle",
+    "--finding-id", "RF-001",
+    "--provider", "github",
+    "--title", draft.title,
+    "--body-file", draft.bodyFile,
+    "--base", "changed-after-preview",
+    "--preview-token", submission.previewToken,
+    "--confirm",
+  ], /parameters changed after preview/);
+  reviewctlFails([
+    "submit", "run",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "lifecycle",
+    "--finding-id", "RF-001",
+    "--provider", "gitlab",
+    "--title", draft.title,
+    "--body-file", draft.bodyFile,
+    "--preview-token", submission.previewToken,
+    "--confirm",
+  ], /parameters changed after preview/);
+  const originalBody = readFileSync(draft.bodyFile, "utf8");
+  writeFileSync(draft.bodyFile, `${originalBody}\nChanged after preview.\n`, "utf8");
+  reviewctlFails([
+    "submit", "run",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "lifecycle",
+    "--finding-id", "RF-001",
+    "--provider", "github",
+    "--title", draft.title,
+    "--body-file", draft.bodyFile,
+    "--preview-token", submission.previewToken,
+    "--confirm",
+  ], /parameters changed after preview/);
+  writeFileSync(draft.bodyFile, originalBody, "utf8");
   reviewctlFails([
     "submit", "run",
     "--repo", repo,

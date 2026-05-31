@@ -106,6 +106,8 @@ node "$reviewctl" tools status --repo C:\path\to\repo
 node "$reviewctl" scope normalize --repo C:\path\to\repo --scope main...feature --scope src
 ```
 
+当 branch、tag 或 commit-ish 与仓库路径同名时，使用 `ref:<value>` 或 `path:<value>` 显式消歧。例如：`--scope ref:src` 审查 `src` 分支，`--scope path:src` 审查 `src/` 目录。无歧义输入仍可省略前缀。
+
 调用 skill 时，可以直接描述目标：
 
 ```text
@@ -129,13 +131,16 @@ high-value findings, and ask me which findings to handle.
 4. **隔离修复**：用户选择 branch 或 worktree。先预览，再确认创建：
 
    ```bash
-   node "$reviewctl" workspace preview --repo <repo> --run-id <run-id> --finding-id RF-001 --mode worktree
-   node "$reviewctl" workspace create  --repo <repo> --run-id <run-id> --finding-id RF-001 --mode worktree --confirm
+   node "$reviewctl" workspace preview --repo <repo> --run-id <run-id> --finding-id RF-001 --mode worktree [--start-ref <ref> --target-branch <branch>]
+   node "$reviewctl" workspace create  --repo <repo> --run-id <run-id> --finding-id RF-001 --mode worktree [--start-ref <ref> --target-branch <branch>] --preview-token <token> --confirm
    ```
+
+   单个 `base...head` comparison 会从 `head` 创建修复 workspace，并将后续 PR/MR 目标设为 `base`。混合 diff scope 或尚未读取元数据的远端 review scope 必须显式提供 `--start-ref` 与 `--target-branch`。
+   每个 preview 都会返回一次性 `previewToken`。对应 create 或 run 必须传入该 token；缺失、过期、重复使用或参数漂移都会被拒绝。
 
 5. **计划批准**：代理生成外部行动计划。用户明确批准后，状态才能进入 `plan_approved`，随后才允许编码。
 6. **编码与自检**：完成代码变更、项目原生测试和 diff 自我 review，记录 `self-reviews/RF-001.md`。
-7. **受控交付**：依次预览并单独确认 commit、push、PR/MR 创建。任何一步都不会自动跳过用户确认。
+7. **受控交付**：依次预览并单独确认 commit、push、PR/MR 创建。执行命令必须携带匹配 preview 返回的一次性 token。`commit preview` 与 `commit run` 还必须通过重复 `--file <path>` 明确列出相同预期文件；执行时会拒绝任何缺失或额外 staged 文件。push preview 和 push run 都要求当前 `HEAD` 与已自检并记录的 commit 完全一致；出现追加提交时必须重新自检和确认。任何一步都不会自动跳过用户确认。
 
 ## Token 优化工具
 
