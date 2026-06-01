@@ -191,7 +191,7 @@ test("tools status detects optional accelerators and CodeGraph index state", (t)
 });
 
 test("tools doctor redacts auth failures and remote fetch caches readable provider artifacts", (t) => {
-  const root = mkdtempSync(join(tmpdir(), "review-fix-ship-provider-"));
+  const root = mkdtempSync(join(tmpdir(), "review fix ship ~ provider-"));
   t.after(() => cleanup(root));
   const stateHome = join(root, "state");
 
