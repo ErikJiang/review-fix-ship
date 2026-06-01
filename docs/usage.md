@@ -94,8 +94,10 @@ macOS 或 Linux：
 reviewctl="<skill-dir>/scripts/reviewctl.mjs"
 node "$reviewctl" preflight --repo /path/to/repo
 node "$reviewctl" tools status --repo /path/to/repo
+node "$reviewctl" tools policy --repo /path/to/repo
 node "$reviewctl" tools doctor --repo /path/to/repo --provider all
 node "$reviewctl" scope normalize --repo /path/to/repo --scope main...feature --scope src
+node "$reviewctl" efficiency activate --repo /path/to/repo --run-id <run-id>
 ```
 
 Windows PowerShell：
@@ -104,8 +106,10 @@ Windows PowerShell：
 $reviewctl = "<skill-dir>\scripts\reviewctl.mjs"
 node "$reviewctl" preflight --repo C:\path\to\repo
 node "$reviewctl" tools status --repo C:\path\to\repo
+node "$reviewctl" tools policy --repo C:\path\to\repo
 node "$reviewctl" tools doctor --repo C:\path\to\repo --provider all
 node "$reviewctl" scope normalize --repo C:\path\to\repo --scope main...feature --scope src
+node "$reviewctl" efficiency activate --repo C:\path\to\repo --run-id <run-id>
 ```
 
 当 branch、tag 或 commit-ish 与仓库路径同名时，使用 `ref:<value>` 或 `path:<value>` 显式消歧。例如：`--scope ref:src` 审查 `src` 分支，`--scope path:src` 审查 `src/` 目录。无歧义输入仍可省略前缀。
@@ -121,8 +125,8 @@ high-value findings, and ask me which findings to handle.
 
 ## 完整工作流
 
-1. **预检与探测**：运行 `preflight`、`tools status` 和按需执行的 `tools doctor`，检查仓库状态、平台、可选 CLI、认证和 token 优化工具。
-2. **归一化范围**：运行 `scope normalize`，获取 `runId`。多个范围统一去重后评选全局 Top 5。
+1. **预检与探测**：运行 `preflight`、`tools status`、`tools policy` 和按需执行的 `tools doctor`，检查仓库状态、平台、可选 CLI、认证和 token 优化工具。
+2. **归一化并激活策略**：运行 `scope normalize` 获取 `runId`，然后运行 `efficiency activate`。多个范围统一去重后评选全局 Top 5。
 3. **初始化产物并记录候选**：代理按 [`review-rubric.md`](../skills/review-fix-ship/references/review-rubric.md) 完成 review，将带简要示例的 findings 写入外部 JSON，再运行：
 
    ```bash
@@ -148,12 +152,12 @@ high-value findings, and ask me which findings to handle.
 
 ## Token 优化工具
 
-运行 `preflight` 或 `tools status` 后，skill 会自主选择可用工具：
+运行 `preflight`、`tools status` 或 `tools policy` 后，skill 会输出统一 execution policy。完成 `scope normalize` 后运行 `efficiency activate`，默认优先启用 `caveman lite` 与显式 RTK wrapper：
 
 | 工具 | 适用场景 | 缺失时 |
 | --- | --- | --- |
-| `caveman` | 压缩进度消息和总结 | 手工保持简短输出 |
-| `rtk` | `git diff`、搜索、读取文件、测试、lint、构建日志 | 使用原生命令 |
+| `caveman` | 使用 `lite` 压缩进度消息和总结 | 手工保持简短输出 |
+| `rtk` | Git 读取、diff、搜索、文件读取和枚举、测试、lint、构建、手工 provider 读取 | 使用定向原生命令并记录回退 |
 | CodeGraph | 结构探索、调用链、影响面、受影响测试 | 使用 `rg` 和定向读取 |
 
 CodeGraph 首次初始化会创建 `.codegraph/`，skill 必须先询问确认，再运行：
@@ -162,7 +166,21 @@ CodeGraph 首次初始化会创建 `.codegraph/`，skill 必须先询问确认�
 codegraph init -i
 ```
 
-`rtk` 在原生 Windows 下可以使用过滤能力，但自动 Bash hook 有限制，因此 skill 会显式调用 `rtk`。WSL 按 Linux 处理。
+`rtk` 在原生 Windows 下可以使用过滤能力，但自动 Bash hook 有限制，因此 skill 会显式调用 `rtk`。WSL 按 Linux 处理。`reviewctl` 状态命令、`remote fetch` 内部 provider 调用和 Git 写操作始终保持 raw。
+
+首次使用某类 RTK route 时记录一次；任何 native 回退都记录原因：
+
+```bash
+node "$reviewctl" efficiency record --repo <repo> --run-id <run-id> --route rtk-search --outcome used
+node "$reviewctl" efficiency record --repo <repo> --run-id <run-id> --route rtk-test --outcome fallback --reason detail-hidden
+node "$reviewctl" efficiency status --repo <repo> --run-id <run-id>
+```
+
+可用 route：`rtk-git-read`、`rtk-diff`、`rtk-search`、`rtk-file-read`、`rtk-file-list`、`rtk-test`、`rtk-lint`、`rtk-build`、`rtk-provider-read`。
+
+可用回退原因：`tool-unavailable`、`unsupported-command`、`wrapper-failed`、`detail-hidden`、`raw-required`。
+
+审计为声明式状态记录，不代理执行任意 shell。可读镜像位于 `.review-fix-ship/runs/<run-id>/efficiency.md` 与 `efficiency.json`。`rtk gain` 仍为可选能力，不进入必需流程。
 
 ## 可选工具安装
 
@@ -230,6 +248,7 @@ node "$reviewctl" version
 node "$reviewctl" state status --repo <repo> --latest
 node "$reviewctl" artifacts list --repo <repo> --run-id <run-id>
 node "$reviewctl" artifacts show --repo <repo> --run-id <run-id> [--finding-id RF-001] [--kind <kind>]
+node "$reviewctl" efficiency status --repo <repo> --run-id <run-id>
 node "$reviewctl" remote fetch --repo <repo> --run-id <run-id>
 node "$reviewctl" state defer  --repo <repo> --run-id <run-id> --finding-id RF-001 --reason <text>
 node "$reviewctl" state finish --repo <repo> --run-id <run-id> --finding-id RF-001 --outcome <committed|pushed|submitted>
@@ -245,7 +264,7 @@ node --test scripts/reviewctl.test.mjs
 node scripts/reviewctl.mjs help
 ```
 
-基础测试不依赖 Python、npm、`gh`、`glab`、`rtk` 或 CodeGraph。
+仓库根目录额外运行 `node scripts/smoke-installed-skill.mjs`。基础测试不依赖 Python、npm、`gh`、`glab`、`rtk` 或 CodeGraph。
 
 ## 待完善事项
 

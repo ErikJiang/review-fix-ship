@@ -20,3 +20,4 @@ jobs:
       - run: node --check skills/review-fix-ship/scripts/reviewctl.mjs
       - run: node --check skills/review-fix-ship/scripts/reviewctl.test.mjs
       - run: node --test skills/review-fix-ship/scripts/reviewctl.test.mjs
+      - run: node scripts/smoke-installed-skill.mjs

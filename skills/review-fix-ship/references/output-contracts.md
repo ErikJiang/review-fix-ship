@@ -50,6 +50,17 @@ Write authoritative `self-reviews/<finding-id>.md` after implementation and mirr
 - Adjustments made
 - Residual risks
 
+## Token Efficiency Audit
+
+After `efficiency activate`, store the selected execution policy and declarative audit in external run state. Mirror readable snapshots to:
+
+```text
+.review-fix-ship/runs/<run-id>/efficiency.json
+.review-fix-ship/runs/<run-id>/efficiency.md
+```
+
+The audit stores the active caveman mode, RTK mode, first successful use of each RTK route, and every native fallback reason. It does not execute commands or require RTK telemetry.
+
 ## PR or MR Draft
 
 Generate concise English text:

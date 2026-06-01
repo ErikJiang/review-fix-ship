@@ -73,6 +73,7 @@ The skill detects and uses these optional accelerators when available:
 | [CodeGraph](https://github.com/colbymchenry/codegraph) | Reduce code exploration calls with a local semantic index |
 
 All accelerators are optional. The skill does not install tools or modify global agent configuration automatically.
+Before exploration, it activates `caveman lite` when detected, prefers explicit `rtk` wrappers for high-output reads, diffs, searches, tests, lint, and builds, and records selected RTK routes plus native fallback reasons in the run artifacts. `reviewctl` operations and Git writes remain raw.
 
 ## Validate
 
@@ -81,6 +82,7 @@ node scripts/validate-skill.mjs
 node --check skills/review-fix-ship/scripts/reviewctl.mjs
 node --check skills/review-fix-ship/scripts/reviewctl.test.mjs
 node --test skills/review-fix-ship/scripts/reviewctl.test.mjs
+node scripts/smoke-installed-skill.mjs
 ```
 
 GitHub Actions runs the same checks on Ubuntu, macOS, and Windows.

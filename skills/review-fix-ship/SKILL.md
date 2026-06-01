@@ -30,11 +30,13 @@ This Agent Skill supports Codex and GitHub Copilot. Read [hosts.md](references/h
    ```powershell
    node "$reviewctl" preflight --repo <repo>
    node "$reviewctl" tools status --repo <repo>
+   node "$reviewctl" tools policy --repo <repo>
    node "$reviewctl" tools doctor --repo <repo> [--provider <github|gitlab|all>]
    node "$reviewctl" scope normalize --repo <repo> --scope <scope> [--scope <scope> ...]
+   node "$reviewctl" efficiency activate --repo <repo> --run-id <run-id>
    ```
 
-3. Apply the token-efficiency recommendations returned by `preflight`. Read [token-efficiency.md](references/token-efficiency.md) before exploring the codebase and [platforms.md](references/platforms.md) when shell or OS differences matter.
+3. Apply the token-efficiency policy before exploring the codebase. Default to `caveman lite` and explicit `rtk` wrappers when detected. Read [token-efficiency.md](references/token-efficiency.md) before exploration and [platforms.md](references/platforms.md) when shell or OS differences matter.
 
 4. Use the returned `runId` for all later commands. Read [review-rubric.md](references/review-rubric.md) before producing findings and [output-contracts.md](references/output-contracts.md) before recording them.
 
@@ -68,10 +70,11 @@ If a PR or MR URL is present, run `tools doctor` and use `remote fetch` to cache
 
 ### 2. Use Token-Efficient Tools
 
-Treat `caveman`, `rtk`, and CodeGraph as optional accelerators. Use them autonomously when detected, but preserve the no-dependency fallback.
+Treat `caveman`, `rtk`, and CodeGraph as optional accelerators. Run `tools policy`, then run `efficiency activate` after `scope normalize`. Use detected tools autonomously, but preserve the no-dependency fallback.
 
-- Activate installed `caveman` concise mode for progress and summaries. Keep findings, approval prompts, plans, and PR/MR drafts complete.
-- Prefer explicit `rtk` wrappers for high-volume exploratory shell output such as Git status, diffs, searches, file reads, lint, builds, and tests. Keep `reviewctl` state operations raw.
+- Activate installed `caveman` in `lite` mode for progress and summaries. Keep findings, approval prompts, plans, warnings, diagnostics, commit messages, and PR/MR drafts complete.
+- Prefer explicit `rtk` wrappers for high-volume exploratory shell output such as Git status, diffs, searches, file reads, file listings, lint, builds, tests, and manual provider reads.
+- Record the first successful use of each `rtk` route and every native fallback with `efficiency record`. Keep `reviewctl` operations, provider calls made inside `remote fetch`, and Git writes raw.
 - Prefer CodeGraph MCP tools for structural questions, call paths, and impact analysis when available. Use CodeGraph CLI as a fallback. Ask before running `codegraph init -i` because it creates `.codegraph/` in the target repository.
 - Never install or globally configure an accelerator without user approval.
 

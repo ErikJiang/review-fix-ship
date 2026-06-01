@@ -58,8 +58,8 @@ function reviewctlJson(args, options = {}) {
   return JSON.parse(reviewctl(args, 0, options).stdout);
 }
 
-function reviewctlFails(args, pattern) {
-  const result = execute(process.execPath, [SCRIPT, ...args]);
+function reviewctlFails(args, pattern, options = {}) {
+  const result = execute(process.execPath, [SCRIPT, ...args], options);
   assert.notEqual(result.status, 0, `Expected failure\nstdout:\n${result.stdout}`);
   assert.match(result.stderr, pattern);
   return result;
@@ -100,6 +100,19 @@ function envWithPathPrefix(directory, extra = {}) {
   return env;
 }
 
+function envWithoutOptionalAccelerators(home) {
+  const env = { ...process.env, HOME: home, USERPROFILE: home, CAVEMAN_SKILL_DIR: join(home, "missing-caveman") };
+  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path") || "PATH";
+  const rtkNames = process.platform === "win32"
+    ? ["rtk.exe", "rtk.cmd", "rtk.bat", "rtk.com", "rtk"]
+    : ["rtk"];
+  env[pathKey] = (env[pathKey] || "")
+    .split(delimiter)
+    .filter((directory) => directory && !rtkNames.some((name) => existsSync(join(directory, name))))
+    .join(delimiter);
+  return env;
+}
+
 function assertSameDirectory(actualPath, expectedPath) {
   const actual = statSync(actualPath);
   const expected = statSync(expectedPath);
@@ -131,14 +144,14 @@ function finding(overrides = {}) {
   };
 }
 
-function initializeArtifacts(repo, stateHome, runId, extra = []) {
+function initializeArtifacts(repo, stateHome, runId, extra = [], options = {}) {
   const preview = reviewctlJson([
     "artifacts", "init", "preview",
     "--repo", repo,
     "--state-home", stateHome,
     "--run-id", runId,
     ...extra,
-  ]);
+  ], options);
   return reviewctlJson([
     "artifacts", "init", "run",
     "--repo", repo,
@@ -147,7 +160,7 @@ function initializeArtifacts(repo, stateHome, runId, extra = []) {
     ...extra,
     "--preview-token", preview.previewToken,
     "--confirm",
-  ]);
+  ], options);
 }
 
 test("preflight reports repository status and optional provider adapters", (t) => {
@@ -163,6 +176,8 @@ test("preflight reports repository status and optional provider adapters", (t) =
   assert.equal(output.efficiency.platform.os, process.platform);
   assert.equal(typeof output.efficiency.tools.rtk.available, "boolean");
   assert.equal(typeof output.efficiency.tools.codegraph.available, "boolean");
+  assert.equal(output.efficiency.executionPolicy.caveman.requestedMode, "lite");
+  assert.equal(output.efficiency.executionPolicy.rtk.requestedMode, "explicit");
 });
 
 test("tools status detects optional accelerators and CodeGraph index state", (t) => {
@@ -182,12 +197,89 @@ test("tools status detects optional accelerators and CodeGraph index state", (t)
   assert.equal(before.tools.rtk.available, true);
   assert.equal(before.tools.codegraph.available, true);
   assert.equal(before.tools.codegraph.initialized, false);
+  assert.equal(before.executionPolicy.caveman.activeMode, "lite");
+  assert.equal(before.executionPolicy.rtk.activeMode, "explicit");
   assert.match(before.recommendations.join("\n"), /Offer to run codegraph init -i/);
 
   mkdirSync(join(repo, ".codegraph"));
   const after = reviewctlJson(["tools", "status", "--repo", repo], { env });
   assert.equal(after.tools.codegraph.initialized, true);
   assert.match(after.recommendations.join("\n"), /Use CodeGraph directly/);
+});
+
+test("efficiency policy activates optional tools, audits routes, and mirrors readable artifacts", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review-fix-ship-efficiency-"));
+  t.after(() => cleanup(root));
+  const repo = createRepo(root);
+  const stateHome = join(root, "state");
+  const bin = join(root, "bin");
+  createFakeTool(bin, "rtk");
+  const caveman = join(root, "caveman");
+  mkdirSync(caveman, { recursive: true });
+  writeFileSync(join(caveman, "SKILL.md"), "# caveman\n", "utf8");
+  const env = envWithPathPrefix(bin, { CAVEMAN_SKILL_DIR: caveman });
+
+  const policy = reviewctlJson(["tools", "policy", "--repo", repo], { env });
+  assert.equal(policy.executionPolicy.caveman.activeMode, "lite");
+  assert.equal(policy.executionPolicy.rtk.activeMode, "explicit");
+  assert.match(policy.executionPolicy.routes.map((route) => route.route).join("\n"), /rtk-test/);
+  assert.match(policy.executionPolicy.rawOnly.join("\n"), /git push/);
+
+  reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "after-activate", "--scope", "main"], { env });
+  reviewctlFails(["efficiency", "record", "--repo", repo, "--state-home", stateHome, "--run-id", "after-activate", "--route", "rtk-search", "--outcome", "used"], /Activate the efficiency policy/, { env });
+  const activated = reviewctlJson([
+    "efficiency", "activate",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "after-activate",
+    "--caveman-mode", "full",
+    "--rtk-mode", "explicit",
+  ], { env });
+  assert.equal(activated.audit.caveman.activeMode, "full");
+  assert.equal(activated.audit.rtk.activeMode, "explicit");
+  initializeArtifacts(repo, stateHome, "after-activate", [], { env });
+  const artifactRoot = join(repo, ".review-fix-ship", "runs", "after-activate");
+  assert.equal(existsSync(join(artifactRoot, "efficiency.json")), true);
+  assert.match(readFileSync(join(artifactRoot, "efficiency.md"), "utf8"), /Caveman mode: `full`/);
+
+  reviewctlJson(["efficiency", "record", "--repo", repo, "--state-home", stateHome, "--run-id", "after-activate", "--route", "rtk-search", "--outcome", "used"], { env });
+  reviewctlJson(["efficiency", "record", "--repo", repo, "--state-home", stateHome, "--run-id", "after-activate", "--route", "rtk-search", "--outcome", "used"], { env });
+  reviewctlJson(["efficiency", "record", "--repo", repo, "--state-home", stateHome, "--run-id", "after-activate", "--route", "rtk-test", "--outcome", "fallback", "--reason", "detail-hidden"], { env });
+  const status = reviewctlJson(["efficiency", "status", "--repo", repo, "--state-home", stateHome, "--run-id", "after-activate"], { env });
+  assert.deepEqual(status.audit.usedRoutes, ["rtk-search"]);
+  assert.equal(status.audit.fallbacks.length, 1);
+  assert.equal(status.audit.fallbacks[0].reason, "detail-hidden");
+  const stateStatus = reviewctlJson(["state", "status", "--repo", repo, "--state-home", stateHome, "--run-id", "after-activate"], { env });
+  assert.deepEqual(stateStatus.efficiencyStatus.audit.usedRoutes, ["rtk-search"]);
+  const shown = reviewctlJson(["artifacts", "show", "--repo", repo, "--state-home", stateHome, "--run-id", "after-activate", "--kind", "efficiency"], { env });
+  assert.match(shown.content, /`rtk-search`/);
+  assert.match(shown.content, /`detail-hidden`/);
+
+  reviewctlFails(["efficiency", "record", "--repo", repo, "--state-home", stateHome, "--run-id", "after-activate", "--route", "unknown", "--outcome", "used"], /--route must be one of/, { env });
+  reviewctlFails(["efficiency", "record", "--repo", repo, "--state-home", stateHome, "--run-id", "after-activate", "--route", "rtk-test", "--outcome", "fallback"], /require --reason/, { env });
+  reviewctlFails(["efficiency", "record", "--repo", repo, "--state-home", stateHome, "--run-id", "after-activate", "--route", "rtk-test", "--outcome", "fallback", "--reason", "unknown"], /--reason must be one of/, { env });
+
+  reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "before-activate", "--scope", "main"], { env });
+  initializeArtifacts(repo, stateHome, "before-activate", [], { env });
+  const beforeArtifactRoot = join(repo, ".review-fix-ship", "runs", "before-activate");
+  assert.equal(existsSync(join(beforeArtifactRoot, "efficiency.json")), true);
+  assert.match(readFileSync(join(beforeArtifactRoot, "efficiency.md"), "utf8"), /Not activated/);
+  reviewctlJson(["efficiency", "activate", "--repo", repo, "--state-home", stateHome, "--run-id", "before-activate", "--caveman-mode", "manual", "--rtk-mode", "native"], { env });
+  const mirrored = JSON.parse(readFileSync(join(beforeArtifactRoot, "efficiency.json"), "utf8"));
+  assert.equal(mirrored.audit.caveman.activeMode, "manual");
+  assert.equal(mirrored.audit.rtk.activeMode, "native");
+});
+
+test("efficiency policy degrades gracefully when caveman and rtk are unavailable", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review-fix-ship-efficiency-fallback-"));
+  t.after(() => cleanup(root));
+  const repo = createRepo(root);
+  const env = envWithoutOptionalAccelerators(join(root, "home"));
+  const policy = reviewctlJson(["tools", "policy", "--repo", repo], { env });
+  assert.equal(policy.tools.caveman.available, false);
+  assert.equal(policy.tools.rtk.available, false);
+  assert.equal(policy.executionPolicy.caveman.activeMode, "manual");
+  assert.equal(policy.executionPolicy.rtk.activeMode, "native");
 });
 
 test("tools doctor redacts auth failures and remote fetch caches readable provider artifacts", (t) => {
@@ -269,6 +361,7 @@ test("schema v2 rejects pre-release run state instead of migrating it", (t) => {
   const stateHome = join(root, "state");
 
   const version = reviewctlJson(["version"]);
+  assert.equal(version.version, "2.1.0");
   assert.equal(version.schemaVersion, 2);
   reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "schema", "--scope", "main"]);
   const status = reviewctlJson(["state", "status", "--repo", repo, "--state-home", stateHome, "--run-id", "schema"]);

@@ -3,9 +3,8 @@
 ## 优先级 P1
 
 - 在 GitHub Actions 中确认 macOS、Ubuntu 和原生 Windows 的首次 CI 运行结果。
-- 分别在 Codex 与 GitHub Copilot CLI 中安装 skill 并完成一次真实仓库 smoke test。
+- 分别在 Codex 与 GitHub Copilot CLI 中安装 skill 并完成一次真实仓库交互 smoke test。
 - 增加 CodeGraph CLI 的受控初始化子命令：只在用户确认后执行 `codegraph init -i`，并自动检查 `.gitignore` 是否需要忽略 `.codegraph/`。
-- 为 `rtk` 增加更细的命令选择表，并记录每次运行实际采用的压缩路径。
 
 ## 优先级 P2
 
