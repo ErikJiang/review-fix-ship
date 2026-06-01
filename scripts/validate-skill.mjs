@@ -54,6 +54,10 @@ for (const file of ["usage.md", "roadmap.md"]) {
   if (!existsSync(join(ROOT, "docs", file))) fail(`Missing repository documentation: docs/${file}`);
 }
 
+if (!existsSync(join(ROOT, "scripts", "smoke-installed-skill.mjs"))) {
+  fail("Missing fresh-install smoke script: scripts/smoke-installed-skill.mjs");
+}
+
 for (const file of ["README.md", "TODO.md"]) {
   if (existsSync(join(SKILL_DIR, file))) fail(`Move non-runtime documentation outside the publishable skill: ${file}`);
 }

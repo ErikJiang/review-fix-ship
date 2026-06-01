@@ -35,6 +35,16 @@ Each workspace stores a repair `startRef` separately from the later PR or MR `ta
 
 Use `state activate` to choose one finding, `state defer` to release unfinished work, and `state finish --outcome <committed|pushed|submitted>` to release locally completed work. Successful PR or MR submission completes the active finding automatically.
 
+## Efficiency State
+
+`scope normalize` snapshots the detected tools and default execution policy. Before exploration, run:
+
+```text
+efficiency activate --repo <repo> --run-id <run-id>
+```
+
+The run stores `efficiencyPolicy` and `efficiencyAudit`. `efficiency record` adds the first successful use of each RTK route and every native fallback. The audit is declarative and never executes shell commands. After artifact initialization, mirror it to `efficiency.json` and `efficiency.md`.
+
 ## Workspace State
 
 The per-finding sequence is:

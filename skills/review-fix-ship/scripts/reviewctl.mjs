@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const SKILL_DIR = dirname(SCRIPT_DIR);
-const HELPER_VERSION = "2.0.0";
+const HELPER_VERSION = "2.1.0";
 const SCHEMA_VERSION = 2;
 const ARTIFACT_DIRECTORY = ".review-fix-ship";
 const ARTIFACT_IGNORE_RULE = `${ARTIFACT_DIRECTORY}/`;
@@ -39,6 +39,26 @@ const WORKSPACE_PHASES = [
   "submitted",
 ];
 const SEVERITIES = new Set(["critical", "high", "medium", "low"]);
+const CAVEMAN_MODES = new Set(["lite", "full", "ultra", "wenyan-lite", "wenyan-full", "wenyan-ultra", "manual"]);
+const RTK_MODES = new Set(["explicit", "native"]);
+const EFFICIENCY_ROUTES = new Set([
+  "rtk-git-read",
+  "rtk-diff",
+  "rtk-search",
+  "rtk-file-read",
+  "rtk-file-list",
+  "rtk-test",
+  "rtk-lint",
+  "rtk-build",
+  "rtk-provider-read",
+]);
+const EFFICIENCY_REASONS = new Set([
+  "tool-unavailable",
+  "unsupported-command",
+  "wrapper-failed",
+  "detail-hidden",
+  "raw-required",
+]);
 
 class ReviewCtlError extends Error {
   constructor(message, details = undefined) {
@@ -303,6 +323,46 @@ function cavemanStatus(repo) {
   };
 }
 
+function executionPolicy(tools, { cavemanMode = "lite", rtkMode = "explicit" } = {}) {
+  const activeCavemanMode = cavemanMode !== "manual" && tools.caveman.available ? cavemanMode : "manual";
+  const activeRtkMode = rtkMode === "explicit" && tools.rtk.available ? "explicit" : "native";
+  return {
+    caveman: {
+      requestedMode: cavemanMode,
+      activeMode: activeCavemanMode,
+      sourcePath: activeCavemanMode === "manual" ? null : tools.caveman.detectedPaths[0] || null,
+      use: "Compress progress and summaries only. Keep findings, plans, approvals, warnings, diagnostics, commits, and drafts complete.",
+      fallback: activeCavemanMode === "manual" ? "Keep user-facing responses concise manually." : null,
+    },
+    rtk: {
+      requestedMode: rtkMode,
+      activeMode: activeRtkMode,
+      commandPath: activeRtkMode === "explicit" ? tools.rtk.commandPath : null,
+      fallback: activeRtkMode === "native" ? "Use narrow native commands and record each fallback when the route applies." : null,
+    },
+    routes: [
+      { route: "rtk-git-read", preferred: "rtk git status|log|show", fallback: "native git read command" },
+      { route: "rtk-diff", preferred: "rtk git diff", fallback: "targeted git diff" },
+      { route: "rtk-search", preferred: "rtk grep", fallback: "rg" },
+      { route: "rtk-file-read", preferred: "rtk read", fallback: "targeted native file read" },
+      { route: "rtk-file-list", preferred: "rtk ls or rtk find", fallback: "native file listing" },
+      { route: "rtk-test", preferred: "matching wrapper or rtk test <command>", fallback: "repository-native test command" },
+      { route: "rtk-lint", preferred: "matching wrapper or rtk err <command>", fallback: "repository-native lint command" },
+      { route: "rtk-build", preferred: "matching wrapper or rtk err <command>", fallback: "repository-native build or validation command" },
+      { route: "rtk-provider-read", preferred: "rtk gh or rtk glab", fallback: "native provider CLI read command" },
+    ],
+    rawOnly: [
+      "node <reviewctl> ...",
+      "git add",
+      "git commit",
+      "git push",
+      "git branch",
+      "git worktree",
+      "reviewctl remote fetch provider calls",
+    ],
+  };
+}
+
 function efficiencyTools(repo) {
   const rtkPath = findCommand("rtk");
   const codegraphPath = findCommand("codegraph");
@@ -345,6 +405,7 @@ function efficiencyTools(repo) {
       node: process.version,
     },
     tools,
+    executionPolicy: executionPolicy(tools),
     recommendations,
   };
 }
@@ -388,6 +449,7 @@ function saveRun(runContext) {
   writeJson(runContext.file, runContext.data);
   if (runContext.data.artifacts?.initialized) {
     for (const root of artifactRoots(runContext)) writeJson(join(root, "run.json"), runContext.data);
+    writeEfficiencyArtifacts(runContext);
   }
 }
 
@@ -473,6 +535,49 @@ function writeArtifactText(runContext, relativePath, content) {
 
 function writeArtifactJson(runContext, relativePath, value) {
   for (const root of artifactRoots(runContext)) writeJson(join(root, relativePath), value);
+}
+
+function efficiencyStatus(runContext) {
+  return {
+    policy: runContext.data.efficiencyPolicy || runContext.data.efficiency?.executionPolicy || null,
+    audit: runContext.data.efficiencyAudit || null,
+  };
+}
+
+function efficiencyMarkdown(status) {
+  const policy = status.policy;
+  const audit = status.audit;
+  const usedRoutes = audit?.usedRoutes?.length
+    ? audit.usedRoutes.map((route) => `- \`${route}\``).join("\n")
+    : "- None recorded.";
+  const fallbacks = audit?.fallbacks?.length
+    ? audit.fallbacks.map((item) => `- \`${item.recordedAt}\` \`${item.route}\`: \`${item.reason}\``).join("\n")
+    : "- None recorded.";
+  return `# Token Efficiency
+
+## Policy
+- Caveman mode: \`${policy?.caveman?.activeMode || "manual"}\`
+- Caveman source: ${policy?.caveman?.sourcePath ? `\`${policy.caveman.sourcePath}\`` : "None."}
+- RTK mode: \`${policy?.rtk?.activeMode || "native"}\`
+- RTK command: ${policy?.rtk?.commandPath ? `\`${policy.rtk.commandPath}\`` : "None."}
+
+## Activation
+- Activated at: ${audit?.activatedAt ? `\`${audit.activatedAt}\`` : "Not activated."}
+
+## Used Routes
+${usedRoutes}
+
+## Fallbacks
+${fallbacks}
+`;
+}
+
+function writeEfficiencyArtifacts(runContext) {
+  const status = efficiencyStatus(runContext);
+  for (const root of artifactRoots(runContext)) {
+    writeJson(join(root, "efficiency.json"), status);
+    writeText(join(root, "efficiency.md"), efficiencyMarkdown(status));
+  }
 }
 
 function findingMarkdown(finding) {
@@ -931,6 +1036,77 @@ function handleToolsStatus(options) {
   printJson(efficiencyTools(repo));
 }
 
+function handleToolsPolicy(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const efficiency = efficiencyTools(repo);
+  printJson({
+    platform: efficiency.platform,
+    tools: efficiency.tools,
+    executionPolicy: efficiency.executionPolicy,
+  });
+}
+
+function validateChoice(value, choices, label) {
+  if (!choices.has(value)) die(`${label} must be one of: ${[...choices].join(", ")}`);
+  return value;
+}
+
+function handleEfficiencyActivate(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const cavemanMode = validateChoice(optional(options, "caveman-mode", "lite"), CAVEMAN_MODES, "--caveman-mode");
+  const rtkMode = validateChoice(optional(options, "rtk-mode", "explicit"), RTK_MODES, "--rtk-mode");
+  const policy = executionPolicy(efficiencyTools(repo).tools, { cavemanMode, rtkMode });
+  const activatedAt = new Date().toISOString();
+  runContext.data.efficiencyPolicy = policy;
+  runContext.data.efficiencyAudit = {
+    activatedAt,
+    caveman: {
+      activeMode: policy.caveman.activeMode,
+      sourcePath: policy.caveman.sourcePath,
+    },
+    rtk: {
+      activeMode: policy.rtk.activeMode,
+      commandPath: policy.rtk.commandPath,
+    },
+    usedRoutes: runContext.data.efficiencyAudit?.usedRoutes || [],
+    fallbacks: runContext.data.efficiencyAudit?.fallbacks || [],
+  };
+  saveRun(runContext);
+  printJson({ runId: runContext.data.id, ...efficiencyStatus(runContext) });
+}
+
+function handleEfficiencyRecord(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  const route = validateChoice(required(options, "route"), EFFICIENCY_ROUTES, "--route");
+  const outcome = validateChoice(required(options, "outcome"), new Set(["used", "fallback"]), "--outcome");
+  const reason = optional(options, "reason");
+  if (!runContext.data.efficiencyAudit) die("Activate the efficiency policy before recording usage");
+  if (reason) validateChoice(reason, EFFICIENCY_REASONS, "--reason");
+  if (outcome === "fallback" && !reason) die("Fallback records require --reason");
+
+  if (outcome === "used") {
+    if (!runContext.data.efficiencyAudit.usedRoutes.includes(route)) {
+      runContext.data.efficiencyAudit.usedRoutes.push(route);
+    }
+  } else {
+    runContext.data.efficiencyAudit.fallbacks.push({
+      route,
+      reason,
+      recordedAt: new Date().toISOString(),
+    });
+  }
+  saveRun(runContext);
+  printJson({ runId: runContext.data.id, ...efficiencyStatus(runContext) });
+}
+
+function handleEfficiencyStatus(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const runContext = loadRun(repo, options, required(options, "run-id"));
+  printJson({ runId: runContext.data.id, ...efficiencyStatus(runContext) });
+}
+
 function providerConfig(provider, repo) {
   const origin = normalizeOrigin(repo.origin);
   if (provider === "github") {
@@ -1096,6 +1272,7 @@ function handleArtifactsShow(options) {
   const relativePath = {
     summary: "findings.md",
     snapshot: "findings.json",
+    efficiency: "efficiency.md",
     finding: findingId ? join("findings", `${findingId}.md`) : null,
     plan: findingId ? join("workspaces", findingId, "plan.md") : null,
     "self-review": findingId ? join("workspaces", findingId, "self-review.md") : null,
@@ -1123,6 +1300,7 @@ function handleScopeNormalize(options) {
   if (existsSync(file)) die(`Run already exists: ${runId}`);
 
   const now = new Date().toISOString();
+  const efficiency = efficiencyTools(repo);
   const runContext = {
     file,
     dir: dirname(file),
@@ -1133,7 +1311,8 @@ function handleScopeNormalize(options) {
       repository: repo,
       phase: "scoped",
       scopes,
-      efficiency: efficiencyTools(repo),
+      efficiency,
+      efficiencyPolicy: efficiency.executionPolicy,
       createdAt: now,
       updatedAt: now,
     },
@@ -1170,6 +1349,7 @@ function handleStateStatus(options) {
     availableFindingIds: states.filter(([, state]) => state.status === "available").map(([id]) => id),
     completedFindingIds: states.filter(([, state]) => state.status === "completed").map(([id]) => id),
     deferredFindingIds: states.filter(([, state]) => state.status === "deferred").map(([id]) => id),
+    efficiencyStatus: efficiencyStatus(runContext),
     nextAction: runContext.data.artifacts?.initialized
       ? (runContext.data.activeFindingId ? `Continue ${runContext.data.activeFindingId}` : "Activate one available or deferred finding")
       : "Initialize repository-local artifacts",
@@ -1652,7 +1832,11 @@ Commands:
   preflight --repo <path>
   version
   tools status --repo <path>
+  tools policy --repo <path>
   tools doctor --repo <path> [--provider <github|gitlab|all>]
+  efficiency activate --repo <path> --run-id <id> [--caveman-mode <mode>] [--rtk-mode <mode>]
+  efficiency record --repo <path> --run-id <id> --route <route> --outcome <used|fallback> [--reason <reason>]
+  efficiency status --repo <path> --run-id <id>
   scope normalize --repo <path> --scope <value> [--scope <value> ...]
   remote fetch --repo <path> --run-id <id>
   artifacts init preview|run --repo <path> --run-id <id> [--track-ignore] [--preview-token <token>]
@@ -1686,7 +1870,11 @@ function main(argv) {
   if (group === "version") return printJson({ version: HELPER_VERSION, schemaVersion: SCHEMA_VERSION });
   if (group === "preflight") return handlePreflight(parseArgs([action, ...rest].filter(Boolean)).options);
   if (group === "tools" && action === "status") return handleToolsStatus(options);
+  if (group === "tools" && action === "policy") return handleToolsPolicy(options);
   if (group === "tools" && action === "doctor") return handleToolsDoctor(options);
+  if (group === "efficiency" && action === "activate") return handleEfficiencyActivate(options);
+  if (group === "efficiency" && action === "record") return handleEfficiencyRecord(options);
+  if (group === "efficiency" && action === "status") return handleEfficiencyStatus(options);
   if (group === "scope" && action === "normalize") return handleScopeNormalize(options);
   if (group === "remote" && action === "fetch") return handleRemoteFetch(options);
   if (group === "artifacts" && action === "init" && rest[0] === "preview") return handleArtifactsInitPreview(parseArgs(rest.slice(1)).options);

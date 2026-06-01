@@ -41,6 +41,6 @@ The helper invokes Git directly with argument arrays. Do not wrap its commands i
 
 ## Optional Tools
 
-- `rtk` ships macOS and Linux binaries and a native Windows binary. Native Windows filters work, but its automatic Bash rewrite hook is limited; call `rtk` explicitly.
+- `rtk` ships macOS and Linux binaries and a native Windows binary. Native Windows filters work, but its automatic Bash rewrite hook is limited; call `rtk` explicitly. Keep `reviewctl` operations and Git writes raw.
 - CodeGraph supports Windows, macOS, and Linux on x64 and arm64. Its local `.codegraph/` index is repository-local.
-- `caveman` has shell installers for macOS/Linux and a PowerShell installer for Windows. Installation and activation remain user-controlled.
+- `caveman` has shell installers for macOS/Linux and a PowerShell installer for Windows. Installation remains user-controlled. When detected, activate `lite` response compression for review progress and summaries.
