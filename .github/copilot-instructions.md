@@ -10,4 +10,5 @@ This repository publishes the `review-fix-ship` Agent Skill for Codex and GitHub
 - Treat `caveman`, `rtk`, CodeGraph, `gh`, and `glab` as optional tools. Detect them automatically, use them when available, and degrade gracefully when absent.
 - Never add automatic tool installation, force operations, destructive cleanup, or implicit remote submission.
 - Run `node scripts/validate-skill.mjs` and `node --test skills/review-fix-ship/scripts/reviewctl.test.mjs` after changes.
-- Update both README files and `skills/review-fix-ship/TODO.md` when behavior or installation guidance changes.
+- Keep user-facing usage and roadmap documentation under `docs/`, outside the publishable skill.
+- Update `README.md` and `docs/usage.md` when behavior or installation guidance changes.

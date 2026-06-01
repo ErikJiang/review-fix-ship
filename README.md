@@ -10,7 +10,7 @@ It supports:
 - GitHub Copilot agent mode in Visual Studio Code
 - macOS, Linux, and Windows
 
-The skill returns at most five verified review findings. After the user selects findings, it can create isolated branches or worktrees, render detailed action plans outside the target repository, implement only after plan approval, self-review the resulting diff, and prepare concise English PR or MR drafts. Local commit, push, and remote PR/MR creation each require separate confirmation.
+The skill returns at most five verified review findings with concise examples. It preserves the full report while activating only one finding at a time for branch or worktree implementation. Machine state remains external; readable reports and plans are mirrored under an ignored `.review-fix-ship/` directory. Local commit, push, and remote PR/MR creation each require separate confirmation.
 Repair workspace start refs are stored separately from later PR or MR target branches, so fixes for `base...head` reviews start from `head` and target `base`.
 Each mutating create or run is bound to its displayed preview with a one-time token.
 Commit execution also rejects staged files unless they exactly match the explicit allowlist shown during commit preview.
@@ -60,7 +60,7 @@ high-value findings, and ask me which findings to handle.
 
 When a repository path and revision share a name, use `ref:<value>` or `path:<value>` to disambiguate the scope.
 
-The full workflow, optional token-saving tools, platform notes, and manual commands are documented in [skills/review-fix-ship/README.md](skills/review-fix-ship/README.md).
+The full workflow, optional token-saving tools, platform notes, and manual commands are documented in [docs/usage.md](docs/usage.md).
 
 ## Token-Efficient Tools
 
@@ -79,6 +79,7 @@ All accelerators are optional. The skill does not install tools or modify global
 ```bash
 node scripts/validate-skill.mjs
 node --check skills/review-fix-ship/scripts/reviewctl.mjs
+node --check skills/review-fix-ship/scripts/reviewctl.test.mjs
 node --test skills/review-fix-ship/scripts/reviewctl.test.mjs
 ```
 
@@ -92,7 +93,7 @@ gh skill publish --dry-run
 
 ## Roadmap
 
-See [skills/review-fix-ship/TODO.md](skills/review-fix-ship/TODO.md).
+See [docs/roadmap.md](docs/roadmap.md).
 
 ## License
 

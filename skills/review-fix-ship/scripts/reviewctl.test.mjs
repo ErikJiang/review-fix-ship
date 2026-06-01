@@ -251,8 +251,9 @@ test("repository-local artifacts require approval, remain ignored, and expose re
   assert.match(shown.content, /## Example/);
   const listed = reviewctlJson(["artifacts", "list", "--repo", repo, "--state-home", stateHome, "--run-id", "artifacts"]);
   assert.ok(listed.roots[0].files.includes("findings/RF-001.md"));
-  const latest = reviewctlJson(["state", "status", "--repo", repo, "--state-home", stateHome]);
+  const latest = reviewctlJson(["state", "status", "--repo", repo, "--state-home", stateHome, "--latest"]);
   assert.equal(latest.run.id, "artifacts");
+  reviewctlFails(["state", "status", "--repo", repo, "--state-home", stateHome, "--run-id", "artifacts", "--latest"], /either --run-id or --latest/);
 
   reviewctlJson(["scope", "normalize", "--repo", repo, "--state-home", stateHome, "--run-id", "tracked-ignore", "--scope", "main"]);
   const trackedPreview = reviewctlJson(["artifacts", "init", "preview", "--repo", repo, "--state-home", stateHome, "--run-id", "tracked-ignore", "--track-ignore"]);

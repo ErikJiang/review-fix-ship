@@ -2,14 +2,14 @@
 
 `review-fix-ship` 是一套面向 Codex 和 GitHub Copilot 的跨平台代码 review、修复规划、受控编码和 PR/MR 交付 Agent Skill。支持 macOS、Linux 和 Windows。
 
-它会在指定的分支、`base...head`、目录、文件、GitHub PR 或 GitLab MR 中筛选最多 5 个经过验证的高价值问题。用户选择问题后，它可以创建独立 branch 或 worktree，生成行动计划，在计划批准后编码、自检，并输出简短英文 PR/MR title 与 description。
+它会在指定的分支、`base...head`、目录、文件、GitHub PR 或 GitLab MR 中筛选最多 5 个经过验证的高价值问题。报告会保留全部 findings，但用户每次只激活一个问题进行计划、编码、自检和 PR/MR 交付。
 
 ## 核心约束
 
 - 不为凑数输出低价值问题。
 - `workspace create`、本地 commit、push、创建 PR/MR 都有独立确认门禁。
 - 不自动 force、reset、clean，不覆盖用户未提交改动。
-- 行动计划和运行状态保存在仓库外部。
+- 机器状态保存在仓库外部；可读报告和计划镜像到 ignored `.review-fix-ship/` 目录。
 - 外部 token 优化工具均为可选能力：自动探测、存在时主动使用、缺失时优雅降级。
 - 不自动安装工具，不自动修改全局代理配置。
 
@@ -94,6 +94,7 @@ macOS 或 Linux：
 reviewctl="<skill-dir>/scripts/reviewctl.mjs"
 node "$reviewctl" preflight --repo /path/to/repo
 node "$reviewctl" tools status --repo /path/to/repo
+node "$reviewctl" tools doctor --repo /path/to/repo --provider all
 node "$reviewctl" scope normalize --repo /path/to/repo --scope main...feature --scope src
 ```
 
@@ -103,6 +104,7 @@ Windows PowerShell：
 $reviewctl = "<skill-dir>\scripts\reviewctl.mjs"
 node "$reviewctl" preflight --repo C:\path\to\repo
 node "$reviewctl" tools status --repo C:\path\to\repo
+node "$reviewctl" tools doctor --repo C:\path\to\repo --provider all
 node "$reviewctl" scope normalize --repo C:\path\to\repo --scope main...feature --scope src
 ```
 
@@ -119,13 +121,15 @@ high-value findings, and ask me which findings to handle.
 
 ## 完整工作流
 
-1. **预检与探测**：运行 `preflight` 和 `tools status`，检查仓库状态、平台、可选 CLI 和 token 优化工具。
+1. **预检与探测**：运行 `preflight`、`tools status` 和按需执行的 `tools doctor`，检查仓库状态、平台、可选 CLI、认证和 token 优化工具。
 2. **归一化范围**：运行 `scope normalize`，获取 `runId`。多个范围统一去重后评选全局 Top 5。
-3. **记录候选**：代理按 `references/review-rubric.md` 完成 review，将 findings 写入外部 JSON，再运行：
+3. **初始化产物并记录候选**：代理按 [`review-rubric.md`](../skills/review-fix-ship/references/review-rubric.md) 完成 review，将带简要示例的 findings 写入外部 JSON，再运行：
 
    ```bash
+   node "$reviewctl" artifacts init preview --repo <repo> --run-id <run-id>
+   node "$reviewctl" artifacts init run     --repo <repo> --run-id <run-id> --preview-token <token> --confirm
    node "$reviewctl" state record-findings --repo <repo> --run-id <run-id> --file <findings.json>
-   node "$reviewctl" state select --repo <repo> --run-id <run-id> --id RF-001
+   node "$reviewctl" state activate --repo <repo> --run-id <run-id> --id RF-001
    ```
 
 4. **隔离修复**：用户选择 branch 或 worktree。先预览，再确认创建：
@@ -139,7 +143,7 @@ high-value findings, and ask me which findings to handle.
    每个 preview 都会返回一次性 `previewToken`。对应 create 或 run 必须传入该 token；缺失、过期、重复使用或参数漂移都会被拒绝。
 
 5. **计划批准**：代理生成外部行动计划。用户明确批准后，状态才能进入 `plan_approved`，随后才允许编码。
-6. **编码与自检**：完成代码变更、项目原生测试和 diff 自我 review，记录 `self-reviews/RF-001.md`。
+6. **编码与自检**：完成代码变更、项目原生测试和 diff 自我 review。权威记录保存在外部状态目录，镜像写入 `.review-fix-ship/runs/<run-id>/workspaces/RF-001/self-review.md`。
 7. **受控交付**：依次预览并单独确认 commit、push、PR/MR 创建。执行命令必须携带匹配 preview 返回的一次性 token。`commit preview` 与 `commit run` 还必须通过重复 `--file <path>` 明确列出相同预期文件；执行时会拒绝任何缺失或额外 staged 文件。push preview 和 push run 都要求当前 `HEAD` 与已自检并记录的 commit 完全一致；出现追加提交时必须重新自检和确认。任何一步都不会自动跳过用户确认。
 
 ## Token 优化工具
@@ -211,7 +215,27 @@ ${REVIEW_FIX_SHIP_HOME:-${CODEX_HOME:-~/.codex}/review-fix-ship}/
   repos/<fingerprint>/runs/<run-id>/
 ```
 
-状态不进入目标仓库。可通过 `--state-home <path>` 覆盖。
+机器状态不进入目标仓库，可通过 `--state-home <path>` 覆盖。完成 `artifacts init` 后，可读镜像位于：
+
+```text
+<repo-or-worktree>/.review-fix-ship/runs/<run-id>/
+```
+
+默认将 `.review-fix-ship/` 写入 Git common directory 的 `info/exclude`。只有显式使用 `--track-ignore` 时才会修改根 `.gitignore`。
+
+## 恢复与查看
+
+```bash
+node "$reviewctl" version
+node "$reviewctl" state status --repo <repo> --latest
+node "$reviewctl" artifacts list --repo <repo> --run-id <run-id>
+node "$reviewctl" artifacts show --repo <repo> --run-id <run-id> [--finding-id RF-001] [--kind <kind>]
+node "$reviewctl" remote fetch --repo <repo> --run-id <run-id>
+node "$reviewctl" state defer  --repo <repo> --run-id <run-id> --finding-id RF-001 --reason <text>
+node "$reviewctl" state finish --repo <repo> --run-id <run-id> --finding-id RF-001 --outcome <committed|pushed|submitted>
+```
+
+`state select` 仅作为兼容别名保留，并且同样只接受一个 finding。新流程使用 `state activate`。
 
 ## 验证
 
@@ -225,4 +249,4 @@ node scripts/reviewctl.mjs help
 
 ## 待完善事项
 
-见 [TODO.md](TODO.md)。
+见 [roadmap.md](roadmap.md)。
