@@ -61,6 +61,7 @@ high-value findings, and ask me which findings to handle.
 When a repository path and revision share a name, use `ref:<value>` or `path:<value>` to disambiguate the scope.
 
 The full workflow, optional token-saving tools, platform notes, and manual commands are documented in [docs/usage.md](docs/usage.md).
+Use `reviewctl review start --repo <repo> --scope <scope>` as the default review entrypoint; it normalizes scope and activates the token-efficiency policy before exploration.
 
 ## Token-Efficient Tools
 
@@ -73,7 +74,7 @@ The skill detects and uses these optional accelerators when available:
 | [CodeGraph](https://github.com/colbymchenry/codegraph) | Reduce code exploration calls with a local semantic index |
 
 All accelerators are optional. The skill does not install tools or modify global agent configuration automatically.
-Before exploration, it activates `caveman lite` when detected, prefers explicit `rtk` wrappers for high-output reads, diffs, searches, tests, lint, and builds, and records selected RTK routes plus native fallback reasons in the run artifacts. `reviewctl` operations and Git writes remain raw.
+Before exploration, `review start` activates `caveman lite` when detected, prefers explicit `rtk` wrappers for high-output reads, diffs, searches, tests, lint, and builds, and reports whether CodeGraph is ready or requires approval for initialization. `reviewctl` operations and Git writes remain raw.
 
 ## Validate
 

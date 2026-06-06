@@ -52,7 +52,7 @@ Write authoritative `self-reviews/<finding-id>.md` after implementation and mirr
 
 ## Token Efficiency Audit
 
-After `efficiency activate`, store the selected execution policy and declarative audit in external run state. Mirror readable snapshots to:
+After `review start` or `efficiency activate`, store the selected execution policy and declarative audit in external run state. Mirror readable snapshots to:
 
 ```text
 .review-fix-ship/runs/<run-id>/efficiency.json

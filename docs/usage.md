@@ -96,8 +96,7 @@ node "$reviewctl" preflight --repo /path/to/repo
 node "$reviewctl" tools status --repo /path/to/repo
 node "$reviewctl" tools policy --repo /path/to/repo
 node "$reviewctl" tools doctor --repo /path/to/repo --provider all
-node "$reviewctl" scope normalize --repo /path/to/repo --scope main...feature --scope src
-node "$reviewctl" efficiency activate --repo /path/to/repo --run-id <run-id>
+node "$reviewctl" review start --repo /path/to/repo --scope main...feature --scope src
 ```
 
 Windows PowerShell：
@@ -108,8 +107,7 @@ node "$reviewctl" preflight --repo C:\path\to\repo
 node "$reviewctl" tools status --repo C:\path\to\repo
 node "$reviewctl" tools policy --repo C:\path\to\repo
 node "$reviewctl" tools doctor --repo C:\path\to\repo --provider all
-node "$reviewctl" scope normalize --repo C:\path\to\repo --scope main...feature --scope src
-node "$reviewctl" efficiency activate --repo C:\path\to\repo --run-id <run-id>
+node "$reviewctl" review start --repo C:\path\to\repo --scope main...feature --scope src
 ```
 
 当 branch、tag 或 commit-ish 与仓库路径同名时，使用 `ref:<value>` 或 `path:<value>` 显式消歧。例如：`--scope ref:src` 审查 `src` 分支，`--scope path:src` 审查 `src/` 目录。无歧义输入仍可省略前缀。
@@ -126,7 +124,7 @@ high-value findings, and ask me which findings to handle.
 ## 完整工作流
 
 1. **预检与探测**：运行 `preflight`、`tools status`、`tools policy` 和按需执行的 `tools doctor`，检查仓库状态、平台、可选 CLI、认证和 token 优化工具。
-2. **归一化并激活策略**：运行 `scope normalize` 获取 `runId`，然后运行 `efficiency activate`。多个范围统一去重后评选全局 Top 5。
+2. **归一化并激活策略**：默认运行 `review start` 获取 `runId` 并立即激活 token-efficiency 策略。多个范围统一去重后评选全局 Top 5。`scope normalize` 与 `efficiency activate` 保留给恢复和高级脚本。
 3. **初始化产物并记录候选**：代理按 [`review-rubric.md`](../skills/review-fix-ship/references/review-rubric.md) 完成 review，将带简要示例的 findings 写入外部 JSON，再运行：
 
    ```bash
@@ -152,7 +150,7 @@ high-value findings, and ask me which findings to handle.
 
 ## Token 优化工具
 
-运行 `preflight`、`tools status` 或 `tools policy` 后，skill 会输出统一 execution policy。完成 `scope normalize` 后运行 `efficiency activate`，默认优先启用 `caveman lite` 与显式 RTK wrapper：
+运行 `preflight`、`tools status` 或 `tools policy` 后，skill 会输出统一 execution policy。默认使用 `review start` 作为探索前门禁，它会完成 scope 归一化、记录 run 状态并激活效率策略，默认优先启用 `caveman lite` 与显式 RTK wrapper：
 
 | 工具 | 适用场景 | 缺失时 |
 | --- | --- | --- |

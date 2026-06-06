@@ -37,13 +37,13 @@ Use `state activate` to choose one finding, `state defer` to release unfinished 
 
 ## Efficiency State
 
-`scope normalize` snapshots the detected tools and default execution policy. Before exploration, run:
+`review start` is the default exploration gate. It snapshots the detected tools, normalizes scope, and activates the default execution policy before code exploration:
 
 ```text
-efficiency activate --repo <repo> --run-id <run-id>
+review start --repo <repo> --scope <scope>
 ```
 
-The run stores `efficiencyPolicy` and `efficiencyAudit`. `efficiency record` adds the first successful use of each RTK route and every native fallback. The audit is declarative and never executes shell commands. After artifact initialization, mirror it to `efficiency.json` and `efficiency.md`.
+For recovery or advanced scripting, `scope normalize` can still create the run and `efficiency activate --repo <repo> --run-id <run-id>` can activate the policy afterward. The run stores `efficiencyPolicy` and `efficiencyAudit`. `efficiency record` adds the first successful use of each RTK route and every native fallback. The audit is declarative and never executes shell commands. After artifact initialization, mirror it to `efficiency.json` and `efficiency.md`.
 
 ## Workspace State
 

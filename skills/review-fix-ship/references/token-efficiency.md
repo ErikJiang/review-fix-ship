@@ -9,11 +9,10 @@ Run:
 ```text
 node "<skill-dir>/scripts/reviewctl.mjs" tools status --repo <repo>
 node "<skill-dir>/scripts/reviewctl.mjs" tools policy --repo <repo>
-node "<skill-dir>/scripts/reviewctl.mjs" scope normalize --repo <repo> --scope <scope>
-node "<skill-dir>/scripts/reviewctl.mjs" efficiency activate --repo <repo> --run-id <run-id>
+node "<skill-dir>/scripts/reviewctl.mjs" review start --repo <repo> --scope <scope>
 ```
 
-`preflight` also includes the same capability matrix and execution policy. `scope normalize` snapshots the policy into run state. `efficiency activate` records the active modes. Default to `caveman lite` and explicit `rtk` wrappers; missing tools degrade to manual concise responses and native commands.
+`preflight` also includes the same capability matrix and execution policy. `review start` is the default exploration gate: it normalizes scope, snapshots the policy into run state, records active modes, and reports whether CodeGraph is ready or requires approval for `codegraph init -i`. `scope normalize` and `efficiency activate` remain available for recovery or advanced scripting. Default to `caveman lite` and explicit `rtk` wrappers; missing tools degrade to manual concise responses and native commands.
 
 ## Decision Table
 
@@ -98,6 +97,7 @@ git worktree
 - Trust indexed structural results unless CodeGraph reports staleness.
 - Run `codegraph status` before using CLI queries.
 - If `.codegraph/` is absent, ask before running `codegraph init -i`; initialization writes a local index into the repository directory.
+- If the user does not approve initialization, continue with native search and record the applicable fallback reason for the RTK route you used instead.
 - Use native search for unsupported languages, generated files, or stale content requiring direct verification.
 
 ## Installation Boundary

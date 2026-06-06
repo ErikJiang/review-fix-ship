@@ -180,6 +180,54 @@ test("preflight reports repository status and optional provider adapters", (t) =
   assert.equal(output.efficiency.executionPolicy.rtk.requestedMode, "explicit");
 });
 
+test("review start normalizes scope and activates efficiency policy", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review-fix-ship-start-"));
+  t.after(() => cleanup(root));
+  const repo = createRepo(root);
+  const stateHome = join(root, "state");
+  const bin = join(root, "bin");
+  createFakeTool(bin, "rtk");
+  createFakeTool(bin, "codegraph");
+  const caveman = join(root, "caveman");
+  mkdirSync(caveman, { recursive: true });
+  writeFileSync(join(caveman, "SKILL.md"), "# caveman\n", "utf8");
+  const env = envWithPathPrefix(bin, { CAVEMAN_SKILL_DIR: caveman });
+
+  const started = reviewctlJson([
+    "review", "start",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "start",
+    "--scope", "main",
+  ], { env });
+  assert.equal(started.runId, "start");
+  assert.equal(started.phase, "scoped");
+  assert.equal(started.scopes[0].ref, "main");
+  assert.equal(started.efficiencyStatus.audit.caveman.activeMode, "lite");
+  assert.equal(started.efficiencyStatus.audit.rtk.activeMode, "explicit");
+  assert.equal(started.codegraph.action, "ask-before-init");
+  assert.match(started.nextActions.join("\n"), /explicit rtk wrappers/);
+
+  const status = reviewctlJson(["efficiency", "status", "--repo", repo, "--state-home", stateHome, "--run-id", "start"], { env });
+  assert.deepEqual(status.audit, started.efficiencyStatus.audit);
+  reviewctlFails([
+    "review", "start",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "start",
+    "--scope", "main",
+  ], /Run already exists/, { env });
+  reviewctlFails([
+    "review", "start",
+    "--repo", repo,
+    "--state-home", stateHome,
+    "--run-id", "bad-mode",
+    "--scope", "main",
+    "--caveman-mode", "invalid",
+  ], /--caveman-mode must be one of/, { env });
+  reviewctlFails(["state", "status", "--repo", repo, "--state-home", stateHome, "--run-id", "bad-mode"], /Run not found/, { env });
+});
+
 test("tools status detects optional accelerators and CodeGraph index state", (t) => {
   const root = mkdtempSync(join(tmpdir(), "review-fix-ship-tools-"));
   t.after(() => cleanup(root));

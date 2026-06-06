@@ -52,10 +52,9 @@ try {
   const policy = reviewctl(script, ["tools", "policy", "--repo", repo], env);
   assert.equal(policy.executionPolicy.caveman.requestedMode, "lite");
   assert.equal(policy.executionPolicy.rtk.requestedMode, "explicit");
-  reviewctl(script, ["scope", "normalize", "--repo", repo, "--run-id", "smoke", "--scope", "main"], env);
-  const activated = reviewctl(script, ["efficiency", "activate", "--repo", repo, "--run-id", "smoke"], env);
+  const activated = reviewctl(script, ["review", "start", "--repo", repo, "--run-id", "smoke", "--scope", "main"], env);
   const status = reviewctl(script, ["efficiency", "status", "--repo", repo, "--run-id", "smoke"], env);
-  assert.deepEqual(status.audit, activated.audit);
+  assert.deepEqual(status.audit, activated.efficiencyStatus.audit);
   assert.equal(status.policy.caveman.requestedMode, "lite");
   assert.equal(status.policy.rtk.requestedMode, "explicit");
   process.stdout.write("Fresh-install smoke passed\n");

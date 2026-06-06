@@ -1051,11 +1051,22 @@ function validateChoice(value, choices, label) {
   return value;
 }
 
+function efficiencyModeOptions(options) {
+  return {
+    cavemanMode: validateChoice(optional(options, "caveman-mode", "lite"), CAVEMAN_MODES, "--caveman-mode"),
+    rtkMode: validateChoice(optional(options, "rtk-mode", "explicit"), RTK_MODES, "--rtk-mode"),
+  };
+}
+
 function handleEfficiencyActivate(options) {
   const repo = repositoryInfo(required(options, "repo"));
   const runContext = loadRun(repo, options, required(options, "run-id"));
-  const cavemanMode = validateChoice(optional(options, "caveman-mode", "lite"), CAVEMAN_MODES, "--caveman-mode");
-  const rtkMode = validateChoice(optional(options, "rtk-mode", "explicit"), RTK_MODES, "--rtk-mode");
+  const status = activateEfficiency(repo, runContext, options);
+  printJson({ runId: runContext.data.id, ...status });
+}
+
+function activateEfficiency(repo, runContext, options, modes = efficiencyModeOptions(options)) {
+  const { cavemanMode, rtkMode } = modes;
   const policy = executionPolicy(efficiencyTools(repo).tools, { cavemanMode, rtkMode });
   const activatedAt = new Date().toISOString();
   runContext.data.efficiencyPolicy = policy;
@@ -1073,7 +1084,7 @@ function handleEfficiencyActivate(options) {
     fallbacks: runContext.data.efficiencyAudit?.fallbacks || [],
   };
   saveRun(runContext);
-  printJson({ runId: runContext.data.id, ...efficiencyStatus(runContext) });
+  return efficiencyStatus(runContext);
 }
 
 function handleEfficiencyRecord(options) {
@@ -1287,6 +1298,16 @@ function handleArtifactsShow(options) {
 
 function handleScopeNormalize(options) {
   const repo = repositoryInfo(required(options, "repo"));
+  const runContext = createScopedRun(repo, options);
+  printJson({
+    runId: runContext.data.id,
+    phase: runContext.data.phase,
+    repository: repo.root,
+    scopes: runContext.data.scopes,
+  });
+}
+
+function createScopedRun(repo, options) {
   const requestedScopes = values(options, "scope").map(String);
   const base = optional(options, "base");
   const head = optional(options, "head");
@@ -1319,7 +1340,57 @@ function handleScopeNormalize(options) {
   };
   saveRun(runContext);
   writeJson(join(runContext.dir, "scopes.json"), scopes);
-  printJson({ runId, phase: "scoped", repository: repo.root, scopes });
+  return runContext;
+}
+
+function codegraphStartStatus(tools) {
+  if (!tools.codegraph.available) {
+    return {
+      available: false,
+      initialized: false,
+      action: "fallback",
+      message: "Use native search because CodeGraph is not available.",
+    };
+  }
+  if (!tools.codegraph.initialized) {
+    return {
+      available: true,
+      initialized: false,
+      indexPath: tools.codegraph.indexPath,
+      action: "ask-before-init",
+      message: "Ask before running codegraph init -i; initialization writes .codegraph/ in the repository.",
+    };
+  }
+  return {
+    available: true,
+    initialized: true,
+    indexPath: tools.codegraph.indexPath,
+    action: "use-codegraph",
+    message: "Use CodeGraph MCP or CLI for structural exploration.",
+  };
+}
+
+function handleReviewStart(options) {
+  const repo = repositoryInfo(required(options, "repo"));
+  const modes = efficiencyModeOptions(options);
+  const runContext = createScopedRun(repo, options);
+  const status = activateEfficiency(repo, runContext, options, modes);
+  const tools = efficiencyTools(repo).tools;
+  printJson({
+    runId: runContext.data.id,
+    phase: runContext.data.phase,
+    repository: repo.root,
+    scopes: runContext.data.scopes,
+    efficiencyStatus: status,
+    tools,
+    codegraph: codegraphStartStatus(tools),
+    nextActions: [
+      "Use caveman lite for progress and summaries when active.",
+      "Use explicit rtk wrappers for exploratory reads, diffs, searches, tests, lint, and builds when active.",
+      "Record each first successful RTK route and every native fallback with efficiency record.",
+      "Use CodeGraph only when initialized, or ask before running codegraph init -i.",
+    ],
+  });
 }
 
 function handleStateStatus(options) {
@@ -1831,6 +1902,7 @@ function printHelp() {
 Commands:
   preflight --repo <path>
   version
+  review start --repo <path> --scope <value> [--scope <value> ...]
   tools status --repo <path>
   tools policy --repo <path>
   tools doctor --repo <path> [--provider <github|gitlab|all>]
@@ -1869,6 +1941,7 @@ function main(argv) {
   if (group === "help" || group === "--help" || group === "-h") return printHelp();
   if (group === "version") return printJson({ version: HELPER_VERSION, schemaVersion: SCHEMA_VERSION });
   if (group === "preflight") return handlePreflight(parseArgs([action, ...rest].filter(Boolean)).options);
+  if (group === "review" && action === "start") return handleReviewStart(options);
   if (group === "tools" && action === "status") return handleToolsStatus(options);
   if (group === "tools" && action === "policy") return handleToolsPolicy(options);
   if (group === "tools" && action === "doctor") return handleToolsDoctor(options);
